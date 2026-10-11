@@ -1,0 +1,38 @@
+Comprobante de pago
+3/octubre/2026 a las 10:00.
+Compraste producto a Varios
+$ 356.01
+Total pagado
+Productos (5)
+$ 602.87
+Descuento
+$ -60.29
+Devolución parcial
+$ -186.57
+Total
+$ 356.01
+Comprobante
+DEMO-OPENPDF-001
+Concepto
+Producto ficticio A con descripción
+en dos líneas
+$ 149 x 1 Unidad
+Producto ficticio B
+con otra descripción
+en tres líneas
+$ 20 x 1 Unidad
+Producto ficticio C
+con descripción
+$ 79.05 x 1 Unidad
+Producto ficticio D
+con descripción
+$ 147.03 x 1 Unidad
+Producto ficticio E
+con descripción
+$ 207.79 x 1 Unidad
+Usuario
+Persona ficticia
+N° de usuario
+0000000000
+Medio de Pago
+Tarjeta ficticia terminada en 0000

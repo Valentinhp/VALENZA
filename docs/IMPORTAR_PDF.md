@@ -1,0 +1,35 @@
+# Importación local de Pedidos
+
+Instala las dependencias del proyecto con `pip install -e ".[gui,ocr,test]"` en el entorno virtual. Inicia `sgccc-demo` con tu base habitual.
+
+1. Configura Yo, las personas y una tarjeta o instrumento activo en los módulos existentes.
+2. En Pedidos selecciona **Importar PDF** y abre `tests/fixtures_synthetic/mp_products.pdf`. Todos sus datos son ficticios.
+3. Revisa fecha, comprobante, medio de pago y productos. Selecciona explícitamente el instrumento: el texto del PDF no elige una tarjeta automáticamente.
+4. El ejemplo contiene productos por $300.00, descuento de $20.00, cargo original de $280.00 y devolución de $30.00; el neto es $250.00. Conserva esos importes separados.
+5. Asigna $250.70 del cuaderno y $49.30 del lápiz a Yo u otras personas. Puedes dividir cada producto entre columnas; cada fila debe sumar cantidad × precio unitario.
+6. Confirma y guarda. El pedido usa el servicio existente; las participaciones suman $300.00 y el cargo bancario es $280.00. El detalle conserva productos, asignaciones, descuento, devolución y neto.
+7. Importa el mismo PDF otra vez: después de completar la vista previa se solicita confirmación adicional de posible duplicado. Responde No para evitar otro pedido. Cancelar la vista previa no escribe datos.
+
+## Límites de esta versión
+
+Solo Mercado Pago, MXN y cantidades enteras. Reconoce filas con `descripción | cantidad | precio unitario | subtotal`, `descripción cantidad x $precio` y bloques con etiquetas Cantidad / Precio unitario. Los diseños distintos requieren completar o corregir la vista previa; no se adivinan productos ni importes. Los centavos deben aparecer en el texto como decimales; diseños que separan visualmente pesos y centavos requieren revisión manual.
+
+La igualdad requerida es productos − descuento = cargo original y cargo original − devolución = neto pagado. En documentos donde “total pagado” significa el cargo antes de devolución, corrige el campo neto al revisar. Sin cargo explícito se propone el total pagado y se advierte; no se infiere el cargo sumando una devolución.
+
+Para asociar una devolución, selecciona el producto importado y pulsa **Asignar devolución al producto seleccionado**. Se propone el importe que ya figura en el PDF; confirma el importe, el instrumento de destino y **Pendiente** o **Acreditado**. Acreditado requiere la fecha real, sin fecha propuesta automáticamente. Usa **Costo restante a cargo de** para elegir quién sigue debiendo la diferencia; **Dividir** permite introducir las participaciones finales. El pedido y sus participaciones originales se conservan, con ajustes auditables aparte. Esta etapa permite asignar una devolución por importación; el resto, si existe, queda explícitamente sin asignar.
+
+**Recompra con el reembolso:** pulsa **Lo compré de nuevo**, introduce importe, fecha real y medio de pago. Selecciona explícitamente **Aplicar sobrante a compra original** si quieres compensar las cuentas familiares. Puedes elegir MAMÁ, Yo o dividir el pendiente. Para un pedido ya guardado, selecciónalo en Pedidos y usa **Lo compré de nuevo** sin reimportar el PDF. La recompra se guarda como pedido distinto, vinculado al producto y financiado por el reembolso; su cuenta por cobrar queda cubierta para no cobrar dos veces el mismo producto.
+
+Ejemplo completo: original $207.79, reembolso $186.57 a Mercado Pago, recompra $129.99, sobrante $56.58 aplicado y pendiente original $151.21. El ajuste previo de $21.22 permanece en el historial y una revisión lo lleva a $151.21; no se acumulan ambos importes. Mercado Pago conserva $56.58 y Nu mantiene $542.58. Un abono bancario real posterior de $56.58 deja Nu en $486.00 sin cambiar nuevamente las participaciones. Aplicar el sobrante no transfiere dinero ni registra un pago bancario; el origen de un pago posterior tampoco se inventa.
+
+Este flujo requiere reembolso acreditado y disponible, recompra por importe no superior al reembolso y pagada desde el mismo instrumento de tipo billetera u otro saldo. Fechas faltantes, fondos insuficientes, otros medios de pago o diferencias requieren revisión; no se crean ajustes para forzar la conciliación. El descuento general sigue separado. Recompra, vínculo y revisiones se guardan atómicamente; un error no deja registros parciales. Una devolución admite una recompra vinculada, sin duplicación.
+
+**Corregir un reparto ya guardado:** selecciona el pedido original en Pedidos y pulsa **Editar reparto devolución/recompra**. Se abre el mismo formulario con los movimientos bloqueados y las participaciones actuales en **Dividir**. El pendiente de $151.21 se explica como $21.22 de diferencia original más $129.99 de recompra. Introduce, por ejemplo, Yo $21.22 y MAMÁ $129.99 y confirma **Guardar reparto**. Se revisa solo el ajuste familiar; la auditoría conserva el reparto anterior y la corrección. No se repite la recompra ni el reembolso y sus movimientos no cambian. Cobros e Inicio se actualizan usando el nuevo reparto. Si los importes no suman el pendiente, el reparto cambió mientras lo editabas o existen abonos incompatibles, no se guarda.
+
+Ejemplo: producto de $207.79 asignado a MAMÁ, devolución de $186.57, costo restante $21.22. Si MAMÁ absorbe la diferencia, sigue debiendo $21.22; si eliges Yo, MAMÁ queda en cero y Yo asume $21.22. El descuento general de $60.29 sigue separado en el pedido y no se distribuye al producto. Un reembolso acreditado reduce únicamente la deuda del instrumento de crédito que lo recibió; si llega a la billetera, registra saldo de billetera y conserva la deuda original de la tarjeta. No crea abonos familiares ni pagos bancarios. El importe del PDF se vincula al evento y no se vuelve a descontar del cargo original.
+
+Una devolución pendiente no cambia saldos. Después de recibirla, selecciona su pedido en **Pedidos → Acreditar devolución pendiente**, confirma la fecha real y el registro existente se acredita una sola vez. Si hay abonos previos incompatibles con el reparto final, la confirmación se bloquea para revisarlos. No se permite anular un pedido con devoluciones asociadas. Los pedidos MSI quedan fuera de esta primera etapa. Toda la importación se guarda en una única transacción; un error no deja pedidos, movimientos ni ajustes parciales.
+
+PDF sin texto: se intenta Tesseract local si está en PATH; de lo contrario se informa que se necesita OCR. No hay descarga de OCR ni servicios de nube. La lectura y OCR se ejecutan en el hilo de la interfaz; PDFs grandes pueden tardar. No hay importación masiva, otros comprobantes ni detección automática de MSI.
+
+Los duplicados se comparan con importaciones anteriores por SHA-256 del archivo, número o fecha e importe. Incluye pedidos anulados. Los pedidos manuales sin evidencia PDF no se pueden identificar por número.

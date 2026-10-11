@@ -1,0 +1,12 @@
+Mercado Pago
+Comprobante de compra
+Número de comprobante: DEMO-MP-001
+Fecha: 10/10/2026
+Medio de pago: Tarjeta ficticia terminación 0000
+Producto | Cantidad | Precio unitario | Subtotal
+Cuaderno ficticio | 2 | $125.35 | $250.70
+Lápiz ficticio | 1 | $49.30 | $49.30
+Descuento: $20.00
+Devolución: $30.00
+Cargo bancario: $280.00
+Total pagado: $250.00

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sgccc"
+version = "0.1.0"
+description = "POC local de importacion OCR para SGCCC"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+sgccc-demo = "sgccc.gui.app:main"
+
+[project.optional-dependencies]
+ocr = ["PyMuPDF>=1.24,<2", "Pillow>=10,<12"]
+cipher = ["sqlcipher3==0.6.3"]
+gui = ["PySide6>=6.8,<7"]
+test = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+where = ["src"]

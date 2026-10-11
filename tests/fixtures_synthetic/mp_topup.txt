@@ -1,0 +1,24 @@
+Comprobante de pago
+#DEMO-TOPUP-001
+Número de celular
+0000000000
+Código de autorización
+000000
+Recarga de celular
+Telcel
+Totalpagado
+$ 200.00
+Total
+Detalles
+Telcel
+Usuario FICTICIO
+Fecha
+10/09/2026
+Medios de pago
+Mastercard terminada en 0000
+Nº de usuario
+0000000000
+Hora
+08:19:34
+$ 200.00
+$ 200.00
