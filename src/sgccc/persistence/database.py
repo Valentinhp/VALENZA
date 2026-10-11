@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import json
 import sqlite3
 from typing import Generator
 
@@ -9,6 +10,8 @@ try:
     from sqlcipher3 import dbapi2 as sqlcipher
 except ImportError:
     sqlcipher = None
+
+DATABASE_ERRORS = (sqlite3.Error,) if sqlcipher is None else (sqlite3.Error, sqlcipher.Error)
 
 
 class DatabaseSecurityError(RuntimeError):
@@ -441,6 +444,7 @@ class LocalDatabase:
         self.connection = connection
         self.synthetic = synthetic
         self.encrypted = encrypted
+        self._session_key = None
         self._migration_backup_state: tuple[int, int] | None = None
         self.connection.row_factory = sqlcipher.Row if encrypted else sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
@@ -486,10 +490,86 @@ class LocalDatabase:
                 "No se pudo abrir la base cifrada. La contraseña puede ser "
                 "incorrecta o la base puede estar dañada."
             ) from error
-        return cls(connection, synthetic=False, encrypted=True)
+        database = cls(connection, synthetic=False, encrypted=True)
+        database._session_key = password
+        return database
 
     def close(self) -> None:
         self.connection.close()
+        self._session_key = None
+
+    def integrity_report(self):
+        """Read-only storage/relationship checks, without financial corrections."""
+        issues = []
+        if self.encrypted and self.connection.execute('PRAGMA cipher_integrity_check').fetchall():
+            issues.append('El cifrado no superó la comprobación de integridad.')
+        if [r[0] for r in self.connection.execute('PRAGMA integrity_check')] != ['ok']:
+            issues.append('La estructura de almacenamiento tiene inconsistencias.')
+        missing = self.connection.execute('PRAGMA foreign_key_check').fetchall()
+        if missing:
+            issues.append(f'Relaciones inválidas: {len(missing)}. No se modificó información.')
+        duplicates = self.connection.execute("SELECT COUNT(*) FROM (SELECT user_id,order_id FROM receivable WHERE order_id IS NOT NULL GROUP BY user_id,order_id HAVING COUNT(*)>1)").fetchone()[0]
+        warnings = [f'Participaciones repetidas por revisar: {duplicates}. No se corrigió ningún registro.'] if duplicates else []
+        invalid = 0
+        for row in self.connection.execute('SELECT old_value,new_value FROM audit_event'):
+            for value in row:
+                if value is not None:
+                    try:
+                        json.loads(value)
+                    except (TypeError, ValueError):
+                        invalid += 1
+        if invalid:
+            issues.append(f'Metadatos de auditoría ilegibles: {invalid}.')
+        return dict(ok=not issues, issues=issues, warnings=warnings, schema_version=int(self.connection.execute('PRAGMA user_version').fetchone()[0]))
+
+    def create_backup(self, path):
+        if not self.encrypted or not self._session_key:
+            raise DatabaseSecurityError('Se requiere una sesión SQLCipher autenticada.')
+        if self.connection.in_transaction:
+            raise DatabaseSecurityError('Finaliza la operación en curso antes de respaldar.')
+        return self.prepare_migration_backup(path, self._session_key)
+
+    def _open_verified_backup(self, path):
+        path = Path(path)
+        if not self.encrypted or not self._session_key or not path.is_file():
+            raise DatabaseSecurityError('Selecciona un respaldo cifrado existente de esta sesión.')
+        current = self.connection.execute('PRAGMA database_list').fetchone()[2]
+        if path.resolve() == Path(current).resolve() or path.samefile(current):
+            raise DatabaseSecurityError('El respaldo debe ser un archivo diferente de la base activa.')
+        backup = LocalDatabase.open(path, self._session_key)
+        try:
+            backup.connection.execute('PRAGMA query_only=ON')
+            backup.connection.execute('BEGIN')
+            if int(backup.connection.execute('PRAGMA user_version').fetchone()[0]) != SCHEMA_VERSION:
+                raise DatabaseSecurityError('El respaldo debe tener la versión actual; no se migrará al restaurarlo.')
+            if not backup.integrity_report()['ok']:
+                raise DatabaseSecurityError('El respaldo no superó integridad y relaciones.')
+            schema = "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+            if [tuple(r) for r in backup.connection.execute(schema)] != [tuple(r) for r in self.connection.execute(schema)]:
+                raise DatabaseSecurityError('El respaldo no corresponde al esquema de esta aplicación.')
+        except Exception:
+            backup.close()
+            raise
+        return backup
+
+    def verify_backup(self, path):
+        backup = self._open_verified_backup(path)
+        backup.close()
+
+    def restore_backup(self, path, safety_path):
+        if self.connection.in_transaction:
+            raise DatabaseSecurityError('Finaliza la operación en curso antes de restaurar.')
+        source = self._open_verified_backup(path)
+        try:
+            self.create_backup(safety_path)
+            # SQLite backup commits the destination atomically, rolling back on failure.
+            source.connection.backup(self.connection)
+            self._migration_backup_state = None
+        except Exception as error:
+            raise DatabaseSecurityError('La restauración no terminó. Conserva el respaldo de seguridad; no vuelvas a guardar hasta revisar el estado.') from error
+        finally:
+            source.close()
+        return Path(safety_path)
 
     @property
     def cipher_version(self) -> str | None:

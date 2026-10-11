@@ -87,6 +87,8 @@ tienen excepciones explícitas. Revisa los textos antes de añadir archivos nuev
 Gitignore no detecta secretos dentro del código.
 
 Consulta [Preparación y publicación privada](docs/GITHUB_PREPARACION.md).
+Para edición de cuentas, respaldos, restauración y reportes familiares, consulta
+[Estabilización y uso cotidiano](docs/ESTABILIZACION.md).
 La etiqueta `v0.1.0-pre-estabilizacion` identifica el código previo a los cambios
 grandes. No sustituye un respaldo cifrado de datos. Para recuperar el código
 en una rama separada:

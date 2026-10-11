@@ -6,7 +6,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 import sys
 import sqlite3
-from datetime import date
+from datetime import date, datetime
+from html import escape
+from io import BytesIO
 from uuid import uuid4
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStyledItemDelegate,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -36,9 +39,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt, Signal, QSignalBlocker
+from PySide6.QtCore import Qt, Signal, QSignalBlocker, QRegularExpression
+from PySide6.QtGui import QRegularExpressionValidator
 
-from sgccc.persistence.database import DatabaseSecurityError, LocalDatabase, SCHEMA_VERSION
+from sgccc.persistence.database import DATABASE_ERRORS, DatabaseSecurityError, LocalDatabase, SCHEMA_VERSION
 from sgccc.persistence.repository import FinanceRepository
 
 
@@ -64,6 +68,58 @@ class MxnLineEdit(QLineEdit):
 
     def setValue(self, cents: int) -> None:
         self.setText(format_money(cents).replace("$", "").replace(" MXN", ""))
+
+
+class CompactMoneyDelegate(QStyledItemDelegate):
+    """Present the common MXN unit once, retaining full values in the model."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if option.text.endswith(' MXN'):
+            option.text = option.text[:-4]
+            option.displayAlignment = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        text = str(index.data() or '')
+        if text.endswith(' MXN'):
+            size.setWidth(option.fontMetrics.horizontalAdvance(text[:-4]) + 12)
+        return size
+
+
+def write_family_pdf(statement, path):
+    """Local, paginated PDF; financial values come from existing receivables."""
+    import pymupdf
+    parts = [f"<h1>Estado de cuenta · {escape(statement['person'])}</h1>",
+             f"<p>Asignado: {format_money(statement['assigned_cents'])}<br>Abonado: {format_money(statement['paid_cents'])}<br><b>Pendiente: {format_money(statement['remaining_cents'])}</b></p>"]
+    for row in statement['rows']:
+        parts.append(f"<h2>{escape(str(row['source_name']))} · {escape(str(row['source_date'] or 'Fecha por revisar'))}</h2>")
+        parts.append('<table><tr><th>Concepto</th><th>Importe asignado original</th></tr>')
+        for concept in row['concepts']:
+            parts.append(f"<tr><td>{escape(concept['description'])}</td><td>{format_money(concept['amount_cents'])}</td></tr>")
+        if not row['concepts']:
+            parts.append(f"<tr><td>Participación registrada; sin conceptos detallados disponibles</td><td>{format_money(row['sale_cents'])}</td></tr>")
+        if row['concept_adjustment_cents']:
+            parts.append(f"<tr><td>Ajustes auditados de devolución / recompra</td><td>{format_money(row['concept_adjustment_cents'])}</td></tr>")
+        parts.append('</table>')
+        for receipt in row['receipts']:
+            parts.append(f"<p>Abono aplicado {escape(receipt['received_at'])}: {format_money(receipt['amount_cents'])}</p>")
+        parts.append(f"<p>Participación vigente: {format_money(row['sale_cents'])} · Abonado: {format_money(row['paid_cents'])}<br><b>Pendiente: {format_money(row['remaining_cents'])}</b></p>")
+    parts.append('<p>Los importes originales y los ajustes explican la participación vigente; no son cargos adicionales. Los abonos personales/familiares no constituyen pagos bancarios.</p>')
+    buffer = BytesIO()
+    writer = pymupdf.DocumentWriter(buffer)
+    try:
+        story = pymupdf.Story(''.join(parts), user_css='body{font-family:sans-serif;font-size:11pt;color:#182536}h1{font-size:20pt;color:#233f60}h2{font-size:13pt}table{width:100%;border-spacing:0}td,th{padding:6pt;border-bottom:1px solid #d8dee9;text-align:left}tr{page-break-inside:avoid}')
+        def page_rect(number, filled):
+            box = pymupdf.Rect(0, 0, 595, 842)
+            return box, pymupdf.Rect(36, 36, 559, 796), None
+        story.write(writer, page_rect)
+    finally:
+        writer.close()
+    with pymupdf.open(stream=buffer.getvalue(), filetype='pdf') as document:
+        for number, page in enumerate(document, 1):
+            page.insert_text((36, 819), f'Valenza | {number} / {len(document)}', fontsize=9)
+        Path(path).write_bytes(document.tobytes())
 
 
 class MainWindow(QMainWindow):
@@ -98,8 +154,10 @@ class MainWindow(QMainWindow):
             else "SGCCC - PRUEBAS EN MEMORIA" if database.synthetic
             else "SGCCC"
         )
-        self.setMinimumSize(820, 520)
+        self.setMinimumSize(680, 480)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.resize(1080, 680)
+        self.statusBar()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -119,7 +177,7 @@ class MainWindow(QMainWindow):
 
         navigation = QListWidget()
         navigation.setObjectName("navigation")
-        navigation.setFixedWidth(190)
+        navigation.setFixedWidth(150)
         navigation.addItems(self.PAGES)
         navigation.currentRowChanged.connect(self._show_page)
         content_row = 1 if self.test_mode else 0
@@ -140,14 +198,38 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.pages, content_row, 1)
         navigation.setCurrentRow(0)
         self.setCentralWidget(root)
+        for combo in self.findChildren(QComboBox):
+            combo.setMinimumContentsLength(10)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         if self.repository is not None:
             for table in (self.cards_table, self.card_payment_history, self.collection_items,
                           self.collection_history, self.orders_table, self.people_table,
                           self.owner_people_table):
                 table.itemSelectionChanged.connect(self._update_action_states)
-                table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-                table.horizontalHeader().setStretchLastSection(True)
                 table.setAlternatingRowColors(True)
+                table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+                table.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
+                table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
+            for table, column in ((self.cards_table, 0), (self.collection_items, 2), (self.orders_table, 0)):
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+                table.horizontalHeader().setMinimumSectionSize(75)
+            self.cards_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+            self.cards_table.setColumnWidth(1, 120)
+            self.cards_table.horizontalHeaderItem(4).setText('Pendiente')
+            for table, columns in ((self.collection_items, (3, 4, 5)), (self.cards_table, (2, 3, 4))):
+                delegate = CompactMoneyDelegate(table)
+                for column in columns:
+                    table.setItemDelegateForColumn(column, delegate)
+            self.collection_items.horizontalHeaderItem(3).setText('Asignado')
+            self.collection_items.horizontalHeader().setStretchLastSection(False)
+            for column in (6, 8, 9, 10):
+                self.collection_items.setColumnHidden(column, True)
+            self.collection_items.setToolTip('Selecciona una cuenta: origen, fecha y tipo se muestran en su detalle.')
+            self.cards_columns_toggle = QPushButton('Ver todas las columnas de tarjetas')
+            self.cards_columns_toggle.setCheckable(True)
+            self.cards_columns_toggle.toggled.connect(lambda visible: [self.cards_table.setColumnHidden(c, not visible) for c in list(range(5, 12)) + [13, 14, 15]])
+            self.cards_table.parentWidget().layout().insertWidget(3, self.cards_columns_toggle)
+            self.cards_columns_toggle.toggled.emit(False)
             self.card_apply_payment.currentIndexChanged.connect(self._update_action_states)
             self.card_apply_installment.currentIndexChanged.connect(self._update_action_states)
             self.card_apply_amount.textChanged.connect(self._update_action_states)
@@ -158,6 +240,22 @@ class MainWindow(QMainWindow):
             self.extra_person.currentIndexChanged.connect(self._update_action_states)
             self.card_instrument.currentIndexChanged.connect(self._update_action_states)
             self._update_action_states()
+            self._fit_money_columns()
+
+    def _fit_money_columns(self):
+        for name, columns in (('collection_items', (3, 4, 5)), ('cards_table', (2, 3, 4))):
+            table = getattr(self, name, None)
+            if table is None:
+                continue
+            for column in columns:
+                width = max(75, table.horizontalHeader().fontMetrics().horizontalAdvance(table.horizontalHeaderItem(column).text()) + 14)
+                for row in range(table.rowCount()):
+                    item = table.item(row, column)
+                    if item:
+                        width = max(width, table.fontMetrics().horizontalAdvance(item.text().removesuffix(' MXN')) + 12)
+                        item.setToolTip(item.text())
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+                table.setColumnWidth(column, width)
 
     def _make_page(self, page_name: str) -> QWidget:
         if page_name == "Inicio":
@@ -210,6 +308,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(notice)
 
         self.cards_table = QTableWidget(0, 16)
+        notice.setText('Importes en MXN. ' + notice.text())
         self.cards_table.setObjectName("cardsTable")
         self.cards_table.setHorizontalHeaderLabels(
             ["Tarjeta", "Institución", "Cargado", "Pagado", "Por liquidar",
@@ -231,7 +330,7 @@ class MainWindow(QMainWindow):
         bank_form = QGridLayout()
         bank_note = QLabel('Consulta de deuda total de la tarjeta seleccionada. No es pago mínimo ni pago para no generar intereses; no crea movimientos.')
         bank_note.setWordWrap(True)
-        bank_form.addWidget(bank_note, 0, 0, 1, 4)
+        bank_form.addWidget(bank_note, 0, 0, 1, 2)
         self.bank_query_amount = MxnLineEdit()
         self.bank_query_amount.setPlaceholderText('Deuda total informada por el banco')
         self.bank_query_date = QLineEdit(date.today().isoformat())
@@ -242,30 +341,31 @@ class MainWindow(QMainWindow):
         bank_form.addWidget(self.bank_query_amount, 1, 1)
         bank_form.addWidget(QLabel('Consultado el (AAAA-MM-DD)'), 2, 0)
         bank_form.addWidget(self.bank_query_date, 2, 1)
-        bank_form.addWidget(self.bank_query_save, 2, 2, 1, 2)
+        bank_form.addWidget(self.bank_query_save, 3, 1)
         layout.addLayout(bank_form)
 
         form = QGridLayout()
         self.card_institution = QComboBox()
         self.card_institution.currentIndexChanged.connect(self._refresh_card_instruments)
         self.card_instrument = QComboBox()
-        form.addWidget(QLabel("Tarjeta"), 0, 0)
         form.addWidget(self.card_institution, 0, 1)
-        form.addWidget(self.card_instrument, 0, 2)
+        form.addWidget(QLabel('Institución'), 0, 0)
+        form.addWidget(QLabel('Tarjeta / cuenta'), 1, 0)
+        form.addWidget(self.card_instrument, 1, 1)
         self.card_payment_amount = QLineEdit()
         self.card_payment_amount.setPlaceholderText("0.00")
         self.card_payment_date = QLineEdit(date.today().isoformat())
         self.card_payment_reference = QLineEdit()
         self.card_payment_reference.setPlaceholderText("Referencia opcional")
-        form.addWidget(QLabel("Pago que yo hice (MXN)"), 1, 0)
-        form.addWidget(self.card_payment_amount, 1, 1)
-        form.addWidget(QLabel("Fecha"), 1, 2)
-        form.addWidget(self.card_payment_date, 1, 3)
-        form.addWidget(QLabel("Referencia"), 2, 0)
-        form.addWidget(self.card_payment_reference, 2, 1)
+        form.addWidget(QLabel("Pago real (MXN)"), 2, 0)
+        form.addWidget(self.card_payment_amount, 2, 1)
+        form.addWidget(QLabel("Fecha"), 3, 0)
+        form.addWidget(self.card_payment_date, 3, 1)
+        form.addWidget(QLabel("Referencia"), 4, 0)
+        form.addWidget(self.card_payment_reference, 4, 1)
         self.record_card_button = QPushButton("Registrar pago a tarjeta")
         self.record_card_button.clicked.connect(self._record_card_payment)
-        form.addWidget(self.record_card_button, 2, 2, 1, 2)
+        form.addWidget(self.record_card_button, 5, 1)
         layout.addLayout(form)
 
         application_form = QGridLayout()
@@ -323,11 +423,15 @@ class MainWindow(QMainWindow):
         calendar_button = QPushButton("Guardar fechas")
         calendar_button.clicked.connect(self._save_card_calendar)
         calendar.addWidget(calendar_button, 2, 2, 1, 2)
+        calendar_note = QLabel('Fechas de la tarjeta seleccionada en la tabla superior.')
+        calendar_note.setWordWrap(True)
+        calendar.addWidget(calendar_note, 3, 0, 1, 4)
         self._add_advanced_section(layout, "Fechas de corte y pago", calendar)
 
         administration = QGridLayout()
         self.admin_institution = QComboBox()
         self.admin_institution_name = QLineEdit()
+        self.admin_institution.currentIndexChanged.connect(self._load_admin_institution_name)
         self.admin_institution_name.setPlaceholderText("Nueva institución")
         add_institution_button = QPushButton("Agregar institución")
         add_institution_button.clicked.connect(self._add_institution)
@@ -335,12 +439,13 @@ class MainWindow(QMainWindow):
         edit_institution_button.clicked.connect(self._edit_institution)
         toggle_institution_button = QPushButton("Activar/desactivar institución")
         toggle_institution_button.clicked.connect(self._toggle_institution)
-        administration.addWidget(QLabel("Instituciones"), 0, 0)
-        administration.addWidget(self.admin_institution, 0, 1)
-        administration.addWidget(self.admin_institution_name, 0, 2)
-        administration.addWidget(add_institution_button, 0, 3)
-        administration.addWidget(edit_institution_button, 0, 4)
-        administration.addWidget(toggle_institution_button, 0, 5)
+        administration.addWidget(QLabel("Institución"), 0, 0)
+        administration.addWidget(self.admin_institution, 0, 1, 1, 2)
+        administration.addWidget(QLabel('Nombre'), 1, 0)
+        administration.addWidget(self.admin_institution_name, 1, 1, 1, 2)
+        administration.addWidget(add_institution_button, 2, 0)
+        administration.addWidget(edit_institution_button, 2, 1)
+        administration.addWidget(toggle_institution_button, 2, 2)
 
         self.admin_card_name = QLineEdit()
         self.admin_card_name.setPlaceholderText("Nombre de tarjeta")
@@ -349,18 +454,37 @@ class MainWindow(QMainWindow):
         self.admin_card_type.addItem("Línea de crédito", "CREDIT_LINE")
         self.admin_card_type.addItem("Saldo wallet", "WALLET_BALANCE")
         self.admin_card_type.addItem("Otro", "OTHER")
+        self.admin_card_institution = QComboBox()
+        self.admin_card_last_four = QLineEdit()
+        self.admin_card_last_four.setValidator(QRegularExpressionValidator(QRegularExpression('[0-9]{0,4}'), self.admin_card_last_four))
+        self.admin_card_last_four.setPlaceholderText('Opcional: cuatro dígitos')
+        self.admin_card_description = QLineEdit()
+        self.admin_card_description.setPlaceholderText('Descripción opcional')
         add_card_button = QPushButton("Agregar tarjeta")
         add_card_button.clicked.connect(self._add_instrument)
         edit_card_button = QPushButton("Guardar cambios")
         edit_card_button.clicked.connect(self._edit_instrument)
         toggle_card_button = QPushButton("Activar/desactivar")
         toggle_card_button.clicked.connect(self._toggle_instrument)
-        administration.addWidget(QLabel("Tarjetas"), 1, 0)
-        administration.addWidget(self.admin_card_name, 1, 1)
-        administration.addWidget(self.admin_card_type, 1, 2)
-        administration.addWidget(add_card_button, 1, 3)
-        administration.addWidget(edit_card_button, 1, 4)
-        administration.addWidget(toggle_card_button, 1, 5)
+        hint = QLabel('Para editar, selecciona la tarjeta o billetera en la tabla superior. Se conserva su identificador e historial.')
+        hint.setWordWrap(True)
+        administration.addWidget(hint, 3, 0, 1, 3)
+        for row, label, widget in ((4, 'Institución de la cuenta', self.admin_card_institution),
+                                   (5, 'Nombre / alias', self.admin_card_name),
+                                   (6, 'Naturaleza', self.admin_card_type),
+                                   (7, 'Terminación', self.admin_card_last_four),
+                                   (8, 'Descripción', self.admin_card_description)):
+            administration.addWidget(QLabel(label), row, 0)
+            administration.addWidget(widget, row, 1, 1, 2)
+        administration.addWidget(add_card_button, 9, 0)
+        administration.addWidget(edit_card_button, 9, 1)
+        administration.addWidget(toggle_card_button, 9, 2)
+        new_card_button = QPushButton('Preparar nueva cuenta')
+        new_card_button.clicked.connect(self._prepare_new_account)
+        administration.addWidget(new_card_button, 10, 0, 1, 3)
+        for button, text in ((add_institution_button, 'Agregar institución'), (edit_institution_button, 'Guardar nombre'),
+                             (toggle_institution_button, 'Activar/desactivar'), (add_card_button, 'Agregar cuenta')):
+            button.setText(text)
         self._add_advanced_section(layout, "Administrar instituciones y tarjetas", administration)
         self._load_admin_catalogs()
 
@@ -407,7 +531,7 @@ class MainWindow(QMainWindow):
             self.repository.record_bank_balance(instrument_id,
                 self._parse_mxn_to_cents(self.bank_query_amount.text()), self.bank_query_date.text().strip())
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit('cards')
 
@@ -454,14 +578,16 @@ class MainWindow(QMainWindow):
 
     def _select_card(self) -> None:
         instrument_id = self._selected_card_id()
-        if getattr(self, '_bank_query_selection', None) != instrument_id:
+        self.admin_card_type.setEnabled(instrument_id is None)
+        selection_changed = getattr(self, '_bank_query_selection', None) != instrument_id
+        if selection_changed:
             self.bank_query_amount.clear()
             self.bank_query_date.setText(date.today().isoformat())
         self._bank_query_selection = instrument_id
         comparison = next((item for item in self.repository.list_bank_comparisons() if item['instrument_id'] == instrument_id), None)
         self.bank_query_save.setEnabled(comparison is not None)
         self.bank_query_comparison.setText(
-            f"Valenza: {format_money(comparison['calculated_cents'])} · Banco: {format_money(comparison['reported_cents'])} "
+            f"Consulta de {comparison['alias']} · {comparison['institution_name']}\nValenza: {format_money(comparison['calculated_cents'])} · Banco: {format_money(comparison['reported_cents'])} "
             f"({comparison['consulted_at']}) · Diferencia banco − Valenza: {format_money(comparison['difference_cents'])}"
             if comparison and comparison['reported_cents'] is not None else 'Saldo bancario: Sin consultar' if comparison else
             'Selecciona una tarjeta o línea de crédito para consultar su deuda total.')
@@ -471,14 +597,22 @@ class MainWindow(QMainWindow):
             return
         instrument = self._selected_admin_instrument()
         if instrument is not None:
-            self.admin_card_name.setText(str(instrument["alias"]))
-            index = self.admin_card_type.findData(instrument["instrument_type"])
-            if index >= 0:
-                self.admin_card_type.setCurrentIndex(index)
-            institution_index = self.card_institution.findData(instrument["institution_id"])
-            self.card_institution.setCurrentIndex(institution_index)
-            if institution_index >= 0:
-                self.card_instrument.setCurrentIndex(self.card_instrument.findData(instrument_id))
+            fields = (self.admin_card_name.text(), self.admin_card_type.currentData(), self.admin_card_institution.currentData(), self.admin_card_last_four.text(), self.admin_card_description.text())
+            dirty = fields != getattr(self, '_admin_loaded_fields', fields)
+            if getattr(self, '_admin_edit_selection', None) != instrument_id or not dirty:
+                self.admin_card_name.setText(str(instrument['alias']))
+                self.admin_card_type.setCurrentIndex(self.admin_card_type.findData(instrument['instrument_type']))
+                self.admin_card_institution.setCurrentIndex(self.admin_card_institution.findData(instrument['institution_id']))
+                profile = self.repository.instrument_profile(instrument_id)
+                self.admin_card_last_four.setText(profile['last_four'])
+                self.admin_card_description.setText(profile['description'])
+                self._admin_edit_selection = instrument_id
+                self._admin_loaded_fields = (self.admin_card_name.text(), self.admin_card_type.currentData(), self.admin_card_institution.currentData(), self.admin_card_last_four.text(), self.admin_card_description.text())
+            if selection_changed or self.card_instrument.currentData() == instrument_id:
+                institution_index = self.card_institution.findData(instrument['institution_id'])
+                self.card_institution.setCurrentIndex(institution_index)
+                if institution_index >= 0:
+                    self.card_instrument.setCurrentIndex(self.card_instrument.findData(instrument_id))
         summary = next(i for i in self.repository.list_card_summaries(include_inactive=True)
                        if i["instrument_id"] == instrument_id)
         details = [
@@ -610,8 +744,8 @@ class MainWindow(QMainWindow):
                 amount_cents=self._parse_mxn_to_cents(self.card_payment_amount.text()),
                 reference=self.card_payment_reference.text().strip() or None,
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("cards")
         self._show_information("El pago quedó actualizado.")
@@ -639,8 +773,8 @@ class MainWindow(QMainWindow):
             self.repository.cancel_institution_payment(
                 str(payment["id"]), reason="Anulación confirmada desde Tarjetas"
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("cards")
         self._show_information("El pago fue anulado y las cuotas se recalcularon.")
@@ -659,7 +793,7 @@ class MainWindow(QMainWindow):
                 amount_cents=amount,
             )
         except (ValueError, sqlite3.IntegrityError) as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self.card_apply_amount.clear()
         self.data_changed.emit("cards")
@@ -678,8 +812,8 @@ class MainWindow(QMainWindow):
                 amount_cents=amount,
                 reference=self.card_payment_reference.text().strip() or None,
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.card_payment_amount.clear()
         self.card_payment_reference.clear()
@@ -688,9 +822,9 @@ class MainWindow(QMainWindow):
 
     def _save_card_calendar(self) -> None:
         try:
-            instrument_id = self.card_instrument.currentData()
+            instrument_id = self._selected_card_id()
             if instrument_id is None:
-                raise ValueError("Selecciona una tarjeta.")
+                raise ValueError("Selecciona una tarjeta en la tabla superior.")
             self.repository.save_instrument_calendar(
                 calendar_id=str(uuid4()),
                 instrument_id=str(instrument_id),
@@ -698,8 +832,8 @@ class MainWindow(QMainWindow):
                 closing_day=self._parse_day(self.card_closing_day.text()),
                 due_day=self._parse_day(self.card_due_day.text()),
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("cards")
         self._show_information("Las fechas de corte y límite quedaron guardadas.")
@@ -722,6 +856,23 @@ class MainWindow(QMainWindow):
                 f"({'activa' if institution['active'] else 'inactiva'})",
                 institution["id"],
             )
+        self._fill_combo(self.admin_card_institution, [(str(i['name']), i['id']) for i in self.repository.list_all_institutions()])
+
+    def _load_admin_institution_name(self):
+        if not hasattr(self, 'admin_institution_name'):
+            return
+        item = next((i for i in self.repository.list_all_institutions() if i['id']==self.admin_institution.currentData()), None)
+        if item:
+            self.admin_institution_name.setText(item['name'])
+
+    def _prepare_new_account(self):
+        self.cards_table.clearSelection()
+        self._admin_edit_selection = None
+        self.admin_card_type.setEnabled(True)
+        self.admin_card_name.clear()
+        self.admin_card_last_four.clear()
+        self.admin_card_description.clear()
+        self.admin_card_name.setFocus()
 
     def _selected_admin_instrument(self) -> dict[str, object] | None:
         instrument_id = self._selected_card_id()
@@ -741,8 +892,8 @@ class MainWindow(QMainWindow):
             if not name:
                 raise ValueError("Escribe el nombre de la institución.")
             self.repository.add_institution(str(uuid4()), name)
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.admin_institution_name.clear()
         self.data_changed.emit("cards")
@@ -757,8 +908,8 @@ class MainWindow(QMainWindow):
             self.repository.update_institution(
                 str(institution_id), self.admin_institution_name.text()
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("cards")
         self._show_information("La institución quedó actualizada.")
@@ -782,8 +933,8 @@ class MainWindow(QMainWindow):
             self.repository.set_institution_active(
                 str(institution_id), not bool(institution["active"])
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("cards")
         self._show_information(
@@ -793,7 +944,7 @@ class MainWindow(QMainWindow):
 
     def _add_instrument(self) -> None:
         try:
-            institution_id = self.admin_institution.currentData()
+            institution_id = self.admin_card_institution.currentData()
             if institution_id is None:
                 raise ValueError("Primero registra o selecciona una institución.")
             self.repository.add_instrument(
@@ -801,13 +952,17 @@ class MainWindow(QMainWindow):
                 str(institution_id),
                 self.admin_card_name.text(),
                 str(self.admin_card_type.currentData()),
+                last_four=self.admin_card_last_four.text().strip(),
+                description=self.admin_card_description.text(),
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.admin_card_name.clear()
         self.data_changed.emit("cards")
         self._show_information("La tarjeta quedó registrada.")
+        self.admin_card_last_four.clear()
+        self.admin_card_description.clear()
 
     def _edit_instrument(self) -> None:
         instrument = self._selected_admin_instrument()
@@ -819,12 +974,16 @@ class MainWindow(QMainWindow):
                 str(instrument["id"]),
                 self.admin_card_name.text(),
                 str(self.admin_card_type.currentData()),
+                institution_id=self.admin_card_institution.currentData(),
+                last_four=self.admin_card_last_four.text().strip(),
+                description=self.admin_card_description.text(),
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
+        self._admin_edit_selection = None
         self.data_changed.emit("cards")
-        self._show_information("Los datos de la tarjeta quedaron actualizados.")
+        self._show_information("Los datos de la cuenta quedaron actualizados; se conservó su historial.")
 
     def _toggle_instrument(self) -> None:
         instrument = self._selected_admin_instrument()
@@ -835,8 +994,8 @@ class MainWindow(QMainWindow):
             self.repository.set_instrument_active(
                 str(instrument["id"]), not bool(instrument["active"])
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("cards")
         self._show_information(
@@ -858,6 +1017,8 @@ class MainWindow(QMainWindow):
         notice.setWordWrap(True)
         outer.addWidget(notice)
         self.collection_totals = QLabel()
+        notice.setToolTip(notice.text())
+        notice.setText('Importes en MXN. Un abono familiar no paga al banco.')
         self.collection_totals.setWordWrap(True)
         outer.addWidget(self.collection_totals)
         self.collection_filter = QComboBox()
@@ -866,7 +1027,21 @@ class MainWindow(QMainWindow):
         self.collection_filter.addItem("Cobros familiares", "FAMILY")
         self.collection_filter.addItem("Históricos por revisar", "UNKNOWN")
         self.collection_filter.currentIndexChanged.connect(self._filter_collections)
-        outer.addWidget(self.collection_filter)
+        self.family_pdf_button = QPushButton('PDF de la persona seleccionada')
+        self.family_pdf_button.clicked.connect(self._export_family_pdf)
+        filters = QHBoxLayout()
+        filters.addWidget(self.collection_filter, 1)
+        filters.addWidget(self.family_pdf_button)
+        outer.addLayout(filters)
+        footer_layout = outer
+        self.collections_scroll = QScrollArea()
+        self.collections_scroll.setWidgetResizable(True)
+        collections_content = QWidget()
+        outer = QVBoxLayout(collections_content)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.collections_scroll.setWidget(collections_content)
+        footer_layout.addWidget(self.collections_scroll, 1)
 
         self.collection_items = QTableWidget(0, 11)
         self.collection_items.setObjectName("collectionItemsTable")
@@ -882,6 +1057,7 @@ class MainWindow(QMainWindow):
         )
         self.collection_items.setSortingEnabled(True)
         self.collection_items.setAlternatingRowColors(True)
+        self.collection_items.setMinimumHeight(200)
         self.collection_items.verticalHeader().setDefaultSectionSize(32)
         self.collection_items.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
@@ -892,28 +1068,33 @@ class MainWindow(QMainWindow):
         self.collection_items.itemSelectionChanged.connect(
             self._select_collection_item
         )
-        outer.addWidget(self.collection_items)
+        outer.addWidget(self.collection_items, 1)
 
         payment_row = QGridLayout()
         self.collection_current_balance = QLabel("Selecciona una cuenta para ver el saldo.")
         self.collection_current_balance.setObjectName("collectionBalance")
-        payment_row.addWidget(self.collection_current_balance, 0, 0, 1, 2)
+        self.collection_current_balance.setWordWrap(True)
+        payment_row.addWidget(self.collection_current_balance, 0, 0, 1, 3)
         self.collection_amount = QLineEdit()
         self.collection_amount.setPlaceholderText("Importe del abono")
-        payment_row.addWidget(QLabel("Abono (MXN)"), 0, 2)
-        payment_row.addWidget(self.collection_amount, 0, 3)
+        payment_row.addWidget(QLabel("Abono (MXN)"), 1, 0)
+        payment_row.addWidget(self.collection_amount, 1, 1)
         self.record_collection_button = QPushButton("Registrar abono")
         self.record_collection_button.clicked.connect(self._record_collection)
         self.record_collection_button.setDefault(True)
-        payment_row.addWidget(self.record_collection_button, 0, 4)
-        outer.addLayout(payment_row)
+        payment_row.addWidget(self.record_collection_button, 1, 2)
+        payment_row.setColumnStretch(1, 1)
+        footer_layout.addLayout(payment_row)
 
         self.collection_details_toggle = QPushButton("Más detalles")
         self.collection_details_toggle.setCheckable(True)
         self.collection_details_toggle.toggled.connect(
             lambda visible: self.collection_details.setVisible(visible)
         )
-        outer.addWidget(self.collection_details_toggle)
+        options_actions = QHBoxLayout()
+        options_actions.addWidget(self.collection_details_toggle)
+        self.collection_details_toggle.setText('Fecha / referencia')
+        outer.addLayout(options_actions)
         self.collection_details = QWidget()
         details_layout = QGridLayout(self.collection_details)
         self.collection_reference = QLineEdit()
@@ -932,7 +1113,8 @@ class MainWindow(QMainWindow):
         self.other_operations_toggle.toggled.connect(
             lambda visible: self.other_operations.setVisible(visible)
         )
-        outer.addWidget(self.other_operations_toggle)
+        self.other_operations_toggle.setText('Extras / comisiones')
+        options_actions.addWidget(self.other_operations_toggle)
         self.other_operations = QWidget()
         extras = QGridLayout(self.other_operations)
         self.extra_person = QComboBox()
@@ -961,15 +1143,12 @@ class MainWindow(QMainWindow):
         self.other_operations.setVisible(False)
         outer.addWidget(self.other_operations)
 
-        history_header = QGridLayout()
-        history_header.addWidget(QLabel("Historial de abonos personales y familiares"), 0, 0)
-        self.collection_history_toggle = QPushButton("Ver historial completo")
+        self.collection_history_toggle = QPushButton("Ver historial")
         self.collection_history_toggle.setCheckable(True)
         self.collection_history_toggle.toggled.connect(
             self._toggle_collection_history
         )
-        history_header.addWidget(self.collection_history_toggle, 0, 1)
-        outer.addLayout(history_header)
+        options_actions.addWidget(self.collection_history_toggle)
         self.collection_history = QTableWidget(0, 8)
         self.collection_history.setHorizontalHeaderLabels(
             ["Fecha", "Persona", "Comercio", "Importe", "Referencia", "Estado", "ID", "Tipo"]
@@ -987,6 +1166,8 @@ class MainWindow(QMainWindow):
             self._select_receipt_history
         )
         outer.addWidget(self.collection_history)
+        self.collection_history.setMinimumHeight(160)
+        self.collection_history.hide()
         receipt_actions = QGridLayout()
         self.edit_receipt_button = QPushButton("Guardar cambios del abono")
         self.edit_receipt_button.clicked.connect(self._edit_selected_receipt)
@@ -995,6 +1176,8 @@ class MainWindow(QMainWindow):
         receipt_actions.addWidget(self.edit_receipt_button, 0, 0)
         receipt_actions.addWidget(self.cancel_receipt_button, 0, 1)
         outer.addLayout(receipt_actions)
+        self.edit_receipt_button.hide()
+        self.cancel_receipt_button.hide()
         self._collection_history_rows: list[dict[str, object]] = []
         self._collection_receipt_in_progress = False
         self._refresh_collections()
@@ -1081,8 +1264,8 @@ class MainWindow(QMainWindow):
                 amount_cents=amount,
                 reference=self.collection_reference.text().strip() or None,
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("collections")
         self._show_information("El abono quedó actualizado.")
@@ -1110,16 +1293,19 @@ class MainWindow(QMainWindow):
             self.repository.cancel_user_payment(
                 str(item["id"]), reason="Anulación confirmada desde Cobros"
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("collections")
         self._show_information("El abono fue anulado y el saldo se recalculó.")
 
     def _toggle_collection_history(self, expanded: bool) -> None:
         self.collection_history_toggle.setText(
-            "Ocultar historial completo" if expanded else "Ver historial completo"
+            "Ocultar historial" if expanded else "Ver historial"
         )
+        self.collection_history.setVisible(expanded)
+        self.edit_receipt_button.setVisible(expanded)
+        self.cancel_receipt_button.setVisible(expanded)
         self._render_collection_history()
 
     def _refresh_collection_items(self) -> None:
@@ -1217,8 +1403,10 @@ class MainWindow(QMainWindow):
         remaining_cents = int(item["remaining_cents"])
         self.collection_current_balance.setText(
             f"{self._participation_label(item['participant_role'])}: "
-            f"pendiente {format_money(remaining_cents)} · {item['status']}"
+            f"pendiente {format_money(remaining_cents)} · {item['status']}\n"
+            f"{item['source_kind']} · {item['source_date'] or 'Fecha por revisar'}"
         )
+        self.collection_current_balance.setWordWrap(True)
         self.record_collection_button.setText(
             "Registrar abono personal" if item["participant_role"] == "PERSONAL" else "Registrar abono"
         )
@@ -1245,8 +1433,8 @@ class MainWindow(QMainWindow):
                 received_at=self.collection_received_date.text().strip(),
                 reference=self.collection_reference.text().strip() or None,
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         finally:
             self._collection_receipt_in_progress = False
@@ -1255,7 +1443,7 @@ class MainWindow(QMainWindow):
         self.collection_reference.clear()
         self.collection_received_date.setText(date.today().isoformat())
         self.data_changed.emit("collections")
-        QMessageBox.information(self, "Abono registrado", "Se actualizó la participación. No se registró ningún pago bancario.")
+        self._show_information("Se actualizó la participación. No se registró ningún pago bancario.")
 
     def _record_extra(self) -> None:
         user_id = self.extra_person.currentData()
@@ -1271,8 +1459,8 @@ class MainWindow(QMainWindow):
                 amount_cents=self._parse_mxn_to_cents(self.extra_amount.text()),
                 description=description,
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.extra_amount.clear()
         self.extra_description.clear()
@@ -1289,8 +1477,8 @@ class MainWindow(QMainWindow):
                 amount_cents=self._parse_mxn_to_cents(self.fee_amount.text()),
                 description=description,
             )
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.fee_amount.clear()
         self.fee_description.clear()
@@ -1338,9 +1526,107 @@ class MainWindow(QMainWindow):
         self.configure_owner_button.setObjectName("configureOwnerButton")
         self.configure_owner_button.clicked.connect(self._configure_owner)
         layout.addWidget(self.configure_owner_button, alignment=Qt.AlignmentFlag.AlignRight)
+        maintenance = QGridLayout()
+        for column, title, slot in ((0, 'Crear respaldo cifrado', self._create_backup),
+                                    (1, 'Restaurar respaldo', self._restore_backup),
+                                    (2, 'Diagnóstico de integridad', self._run_integrity)):
+            button = QPushButton(title)
+            button.clicked.connect(slot)
+            if column < 2:
+                button.setEnabled(self.database.encrypted)
+            maintenance.addWidget(button, column // 2, column % 2, 1, 2 if column == 2 else 1)
+        layout.addLayout(maintenance)
+        self.maintenance_result = QTextEdit()
+        self.maintenance_result.setReadOnly(True)
+        self.maintenance_result.setMaximumHeight(160)
+        self.maintenance_result.setPlaceholderText('Restaurar requiere confirmación y crea un respaldo cifrado de la base actual.')
+        layout.addWidget(self.maintenance_result)
         layout.addStretch()
         self._refresh_owner_people()
         return page
+
+    def _run_integrity(self):
+        try:
+            report = self.database.integrity_report()
+            self.maintenance_result.setPlainText(('Integridad y relaciones correctas. Revisión de solo lectura.' if report['ok'] else '\n'.join(report['issues'])) + '\n' + '\n'.join(report['warnings']))
+        except Exception:
+            self._show_error('No se pudo completar el diagnóstico. No se modificaron registros.')
+
+    def _create_backup(self):
+        name = f"valenza-{datetime.now():%Y%m%d-%H%M%S}.db"
+        path, _ = QFileDialog.getSaveFileName(self, 'Crear respaldo cifrado', name, 'Base cifrada (*.db)')
+        if not path:
+            return
+        try:
+            self.database.create_backup(path)
+        except Exception:
+            self._show_error('No se pudo crear y verificar el respaldo. Elige una ruta nueva con permisos de escritura; no reemplaces un archivo existente.')
+            return
+        self.maintenance_result.setPlainText(f'Respaldo cifrado creado y verificado:\n{path}\nConserva la clave actual en un lugar seguro; no se incluye en el archivo.')
+        self._show_information('Respaldo cifrado verificado.')
+
+    def _restore_backup(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'Seleccionar respaldo cifrado', '', 'Base cifrada (*.db)')
+        if not path:
+            return
+        try:
+            self.database.verify_backup(path)
+        except Exception:
+            self._show_error('El respaldo no es válido para esta sesión: comprueba su clave y versión. La base actual no se modificó.')
+            return
+        if QMessageBox.question(self, 'Restaurar respaldo',
+            'Se reemplazarán los datos activos por el respaldo seleccionado y se descartarán capturas sin guardar.\n'
+            'Antes se guardará una copia cifrada y verificada de los datos actuales.\n¿Restaurar?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        current = Path(self.database.connection.execute('PRAGMA database_list').fetchone()[2])
+        safety = current.parent / 'backups' / f'pre-restauracion-{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex}.db'
+        try:
+            safety.parent.mkdir(parents=True, exist_ok=True)
+            self.database.restore_backup(path, safety)
+        except Exception:
+            self.maintenance_result.setPlainText(f'La restauración no terminó. Respaldo de seguridad, si pudo completarse:\n{safety}')
+            self._show_error('No se completó la restauración. Revisa el diagnóstico y conserva el respaldo de seguridad antes de continuar.')
+            return
+        self.manual_dialog.reject()
+        self._clear_order_form()
+        self._admin_edit_selection = None
+        self._bank_query_selection = None
+        self.data_changed.emit('all')
+        self.maintenance_result.setPlainText(f'Respaldo restaurado. Se conservó la copia anterior:\n{safety}')
+        self._show_information('Restauración completada; se conservó la copia anterior.')
+
+    def _export_family_pdf(self):
+        row = self._selected_row(self.collection_items)
+        if row is None:
+            self._show_error('Selecciona una participación de la persona que quieres consultar.')
+            return
+        user_id = self.collection_items.item(row, 1).text()
+        path, _ = QFileDialog.getSaveFileName(self, 'Guardar estado de cuenta de esta persona', 'estado-de-cuenta.pdf', 'PDF (*.pdf)')
+        if not path:
+            return
+        try:
+            write_family_pdf(self.repository.family_statement(user_id), path)
+        except ImportError:
+            self._show_error('Instala la dependencia local PyMuPDF para generar PDF.')
+            return
+        except Exception:
+            self._show_error('No se pudo generar el PDF. Comprueba el destino y sus permisos. No se modificaron movimientos.')
+            return
+        self._show_information('Estado de cuenta PDF generado; no se modificaron saldos.')
+
+    def _show_result_breakdown(self, visible):
+        self.dashboard_result_details.setVisible(visible)
+        if not visible or self.repository is None:
+            return
+        rows = self.repository.expected_result_breakdown()
+        parts = ['<b>Familia asignada − costo efectivo de cada operación</b><br>Recompras vinculadas incluidas una vez. Antes de abonos personales; sin intereses ni comisiones.<br>']
+        for row in rows:
+            parts.append(f"<p>{escape(row['merchant'])} · {escape(row['date'])}<br>{format_money(row['family_cents'])} − {format_money(row['cost_cents'])} = <b>{format_money(row['result_cents'])}</b></p>")
+        total = sum(r['result_cents'] for r in rows)
+        parts.append(f"<b>Resultado previsto total {'a favor' if total >= 0 else 'a mi cargo'}: {format_money(abs(total))}</b><br>Los descuentos ya están reflejados en el costo efectivo; no se restan otra vez. No es dinero cobrado ni saldo bancario.")
+        self.dashboard_result_details.setHtml(''.join(parts))
 
     def _refresh_owner_people(self, selected_id: str | None = None) -> None:
         if not hasattr(self, "owner_people_table") or self.repository is None:
@@ -1407,7 +1693,7 @@ class MainWindow(QMainWindow):
                 person_id, actor="desktop"
             )
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self._refresh_owner_people(person_id)
         self._refresh_people()
@@ -1762,6 +2048,7 @@ class MainWindow(QMainWindow):
         self.orders_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.orders_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.orders_table.verticalHeader().setDefaultSectionSize(36)
+        self.orders_table.setMinimumHeight(140)
         self.orders_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
@@ -1791,7 +2078,7 @@ class MainWindow(QMainWindow):
         self.order_detail = QTextEdit()
         self.order_detail.setObjectName("orderDetail")
         self.order_detail.setReadOnly(True)
-        self.order_detail.setMinimumHeight(100)
+        self.order_detail.setMinimumHeight(60)
         layout.addWidget(self.order_detail, 2)
         self._load_order_catalogs()
         self._reset_order_allocations()
@@ -1806,6 +2093,7 @@ class MainWindow(QMainWindow):
         return page
 
     def _open_manual_expense(self):
+        self._manual_started = True
         available = self.screen().availableGeometry()
         self.manual_dialog.resize(min(760, available.width() - 32), min(580, available.height() - 64))
         if self.manual_edit_id:
@@ -1932,7 +2220,7 @@ class MainWindow(QMainWindow):
             if ImportPreview(self.repository, draft, self).exec():
                 self._refresh_visible_data()
         except (ValueError, RuntimeError, OSError) as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
 
     def _load_order_catalogs(self) -> None:
         self.order_institution.clear()
@@ -2097,7 +2385,7 @@ class MainWindow(QMainWindow):
         try:
             self.repository.confirm_product_refund(refund['id'], credited_at)
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self._refresh_visible_data()
 
@@ -2113,8 +2401,8 @@ class MainWindow(QMainWindow):
             return
         try:
             self.repository.update_order_merchant(order_id, merchant)
-        except (ValueError, sqlite3.Error) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("orders")
         self._show_information("Comercio actualizado. Los importes y el reparto se conservaron.")
@@ -2151,7 +2439,7 @@ class MainWindow(QMainWindow):
                 order_id, reason="Anulación confirmada desde Pedidos"
             )
         except (ValueError, sqlite3.IntegrityError) as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("orders")
         self._show_information("Pedido anulado. Se conservaron su historial y auditoría.")
@@ -2465,7 +2753,7 @@ class MainWindow(QMainWindow):
         try:
             amount = self._order_input_cents(self.order_amount, "El importe asignado")
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         for row in range(self.order_allocations_table.rowCount()):
             if self.order_allocations_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == user_id:
@@ -2502,7 +2790,7 @@ class MainWindow(QMainWindow):
         try:
             amount = self._order_input_cents(self.order_amount, "El importe asignado")
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self.order_allocations_table.item(row, 1).setText(format_money(amount))
         self._update_order_preview()
@@ -2593,6 +2881,10 @@ class MainWindow(QMainWindow):
         return tuple(allocations)
 
     def _save_order(self) -> None:
+        if getattr(self, '_order_save_in_progress', False):
+            return
+        self._order_save_in_progress = True
+        self.save_order_button.setEnabled(False)
         try:
             if self.manual_dialog.isVisible() and not self.manual_concepts.rowCount():
                 raise ValueError('Agrega al menos un concepto antes de guardar el gasto.')
@@ -2652,9 +2944,12 @@ class MainWindow(QMainWindow):
                 interest_cents=interest_cents,
                 concepts=self._read_manual_concepts() if self.manual_concepts.rowCount() else None,
             )
-        except (ValueError, sqlite3.IntegrityError) as error:
-            self._show_error(str(error))
+        except (ValueError, *DATABASE_ERRORS) as error:
+            self._show_error(self._safe_error(error))
             return
+        finally:
+            self._order_save_in_progress = False
+            self._update_order_preview()
         self.data_changed.emit("orders")
         self._show_information("Pedido guardado correctamente.")
         self.manual_dialog.accept()
@@ -2744,7 +3039,7 @@ class MainWindow(QMainWindow):
         try:
             unit_price_cents = self._parse_mxn_to_cents(self.product_unit_price.text())
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         row = self.products_table.rowCount()
         product_id = str(uuid4())
@@ -2791,7 +3086,7 @@ class MainWindow(QMainWindow):
         try:
             unit_price_cents = self._parse_mxn_to_cents(self.product_unit_price.text())
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         product_id = self.products_table.item(row, 0).text()
         self.products_table.item(row, 1).setText(description)
@@ -3000,7 +3295,7 @@ class MainWindow(QMainWindow):
                 allocations=allocations,
             )
         except (ValueError, sqlite3.IntegrityError) as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self.data_changed.emit("orders")
         self._show_information("Compra guardada correctamente.")
@@ -3148,7 +3443,7 @@ class MainWindow(QMainWindow):
         try:
             self.repository.deactivate_person(person_id, actor="desktop")
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self._refresh_people(person_id)
         self.data_changed.emit("users")
@@ -3162,7 +3457,7 @@ class MainWindow(QMainWindow):
         try:
             self.repository.reactivate_person(person_id, actor="desktop")
         except ValueError as error:
-            self._show_error(str(error))
+            self._show_error(self._safe_error(error))
             return
         self._refresh_people(person_id)
         self.data_changed.emit("users")
@@ -3182,8 +3477,14 @@ class MainWindow(QMainWindow):
     def _show_error(self, message: str) -> None:
         QMessageBox.critical(self, "No se pudo completar la operación", message)
 
+    @staticmethod
+    def _safe_error(error):
+        if isinstance(error, DATABASE_ERRORS):
+            return 'No se pudo completar la operación de almacenamiento. Conserva la captura, revisa el diagnóstico y vuelve a intentarlo.'
+        return str(error)
+
     def _show_information(self, message: str) -> None:
-        QMessageBox.information(self, "Operación completada", message)
+        self.statusBar().showMessage(message, 10000)
 
     def _make_dashboard(self) -> QWidget:
         page = QWidget()
@@ -3227,10 +3528,27 @@ class MainWindow(QMainWindow):
         self.dashboard_net_pending = QLabel()
         self.dashboard_expected = QLabel()
         self.dashboard_received = QLabel()
+        expected_row = QHBoxLayout()
         for label in (self.dashboard_net_pending, self.dashboard_expected, self.dashboard_received):
             label.setWordWrap(True)
-            layout.addWidget(label)
+            if label is self.dashboard_expected:
+                expected_row.addWidget(label, 1)
+                layout.addLayout(expected_row)
+            else:
+                layout.addWidget(label)
         self.dashboard_expected.setToolTip('Resultado de pedidos activos antes de abonos personales. Incluye cada recompra vinculada una vez; excluye intereses y comisiones. No es dinero cobrado.')
+        self.dashboard_result_toggle = QPushButton('Ver cálculo')
+        self.dashboard_result_toggle.setToolTip('Desglose del resultado previsto: si se cobra todo a familiares, antes de abonos personales.')
+        self.dashboard_result_toggle.setCheckable(True)
+        self.dashboard_result_toggle.setEnabled(self.repository is not None)
+        self.dashboard_result_toggle.toggled.connect(self._show_result_breakdown)
+        expected_row.addWidget(self.dashboard_result_toggle)
+        self.dashboard_result_details = QTextEdit()
+        self.dashboard_result_details.setReadOnly(True)
+        self.dashboard_result_details.setMinimumHeight(120)
+        self.dashboard_result_details.setMaximumHeight(200)
+        self.dashboard_result_details.hide()
+        layout.addWidget(self.dashboard_result_details)
         self.dashboard_received.setToolTip('Dinero registrado como abonos familiares activos, contado una vez por abono. Aportaciones personales y reembolsos son conceptos distintos.')
         layout.addWidget(QLabel('Deudas por tarjeta · diferencia = banco − Valenza'))
         self.dashboard_cards = QTableWidget(0, 5)
@@ -3317,11 +3635,14 @@ class MainWindow(QMainWindow):
         self.dashboard_debt.findChild(QLabel, "summaryAmount").setText(format_money(debt))
         self.dashboard_discount.findChild(QLabel, 'summaryAmount').setText(format_money(discount))
         self.dashboard_net_pending.setText(f'Mi parte pendiente menos descuentos: {format_money(net_pending)} · comparación, sin modificar deudas.')
-        self.dashboard_expected.setText(f"Resultado personal previsto {'a favor' if expected >= 0 else 'a mi cargo'}: {format_money(abs(expected))} · si se cobra todo a familiares; antes de abonos personales.")
+        self.dashboard_expected.setText(f"Resultado personal previsto {'a favor' if expected >= 0 else 'a mi cargo'}: {format_money(abs(expected))} · antes de abonos personales.")
+        self.dashboard_cards.setFixedHeight(min(140, max(85, self.dashboard_cards.horizontalHeader().height() + self.dashboard_cards.rowCount() * 26 + 4)))
         self.dashboard_received.setText(f'Abonos familiares realmente recibidos: {format_money(received)} · descuentos = ahorro; resultado previsto ≠ dinero cobrado.')
         self.dashboard_cards_total.setText(f'Total de deuda calculada: {format_money(debt)} · las consultas bancarias no ajustan los saldos.')
         self.dashboard_credit.setVisible(bool(self.dashboard_credit.text()))
         self.dashboard_unclassified.setVisible(bool(self.dashboard_unclassified.text()))
+        if self.dashboard_result_toggle.isChecked():
+            self._show_result_breakdown(True)
 
     @staticmethod
     def _make_card(label: str, value: str) -> QFrame:
@@ -3345,6 +3666,7 @@ class MainWindow(QMainWindow):
         if self.repository is None or not hasattr(self, "pages"):
             return
         page_name = self.PAGES[self.pages.currentIndex()]
+        scroll_positions = [(bar, bar.value()) for table in self.findChildren(QTableWidget) for bar in (table.verticalScrollBar(), table.horizontalScrollBar())]
         if _domain != "navigation" or page_name in {"Pedidos", "Tarjetas"}:
             self._sync_catalogs()
         refreshers = {
@@ -3359,6 +3681,15 @@ class MainWindow(QMainWindow):
             if _domain != "navigation" or name == page_name:
                 refresher()
         self._update_action_states()
+
+        self._fit_money_columns()
+        for bar, value in scroll_positions:
+            bar.setValue(value)
+        for table, column in ((self.cards_table, 0), (self.collection_items, 2)):
+            for row in range(table.rowCount()):
+                item = table.item(row, column)
+                if item:
+                    item.setToolTip('<p>' + escape(item.text()) + '</p>')
 
     @staticmethod
     def _table_id(table: QTableWidget, column: int) -> str | None:
@@ -3379,10 +3710,17 @@ class MainWindow(QMainWindow):
 
     def _sync_catalogs(self) -> None:
         institutions = [(str(i["name"]), i["id"]) for i in self.repository.list_institutions()]
+        by_instrument = {i['id']: i for i in self.repository.list_all_instruments()}
         for prefix in ("order", "card"):
             selected_instrument = getattr(self, f'{prefix}_instrument').currentData()
             selected_institution = getattr(self, f'{prefix}_institution').currentData()
+            if selected_instrument in by_instrument:
+                selected_institution = by_instrument[selected_instrument]['institution_id']
             self._fill_combo(getattr(self, f"{prefix}_institution"), institutions)
+            with QSignalBlocker(getattr(self, f'{prefix}_institution')):
+                index = getattr(self, f'{prefix}_institution').findData(selected_institution)
+                if index >= 0:
+                    getattr(self, f'{prefix}_institution').setCurrentIndex(index)
             if prefix == 'order' and selected_institution is not None:
                 combo = self.order_institution
                 if combo.findData(selected_institution) < 0:
@@ -3401,6 +3739,7 @@ class MainWindow(QMainWindow):
             (f"{i['name']} ({'activa' if i['active'] else 'inactiva'})", i["id"])
             for i in self.repository.list_all_institutions()
         ])
+        self._fill_combo(self.admin_card_institution, [(str(i['name']), i['id']) for i in self.repository.list_all_institutions()])
         people = self._order_people_catalog()
         for row in range(self.manual_concepts.rowCount()):
             self.manual_concepts.cellWidget(row, 2).refresh_people(list(people.values()))
@@ -3436,6 +3775,7 @@ class MainWindow(QMainWindow):
         self.edit_payment_button.setEnabled(payment_active)
         self.cancel_payment_button.setEnabled(payment_active)
         receivable_id = self._table_id(self.collection_items, 7)
+        self.family_pdf_button.setEnabled(receivable_id is not None)
         account = next((i for i in self.repository.list_collection_items()
                         if i["receivable_id"] == receivable_id), None)
         try:
@@ -3504,9 +3844,15 @@ class MainWindow(QMainWindow):
             button.setEnabled(value > 0 and bool(description.text().strip()) and bool(identity))
 
     def closeEvent(self, event) -> None:
+        if self.database is not None and self.database.encrypted and not self.test_mode and getattr(self, '_manual_started', False):
+            dirty = bool(self.order_merchant.text().strip()) or any(self.manual_concepts.item(r, 0).text().strip() for r in range(self.manual_concepts.rowCount()))
+            if dirty and QMessageBox.question(self, 'Captura sin guardar', 'Hay un gasto sin guardar. ¿Cerrar y descartarlo?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         if self.database is not None:
             self.database.close()
             self.database = None
+        self.data_changed.disconnect()
         super().closeEvent(event)
 
 
@@ -3517,6 +3863,16 @@ def create_application(argv: list[str] | None = None) -> QApplication:
     application.setStyleSheet(
         """
         QWidget { font-size: 14px; }
+        QPushButton { min-height: 26px; padding: 4px 10px; border: 1px solid #aebdce; border-radius: 4px; background: #f8fafc; color: #182536; }
+        QPushButton:hover { background: #edf4fc; }
+        QPushButton:focus { border-color: #2563eb; }
+        QPushButton:disabled { background: #edf1f5; color: #64748b; border-color: #cbd5e1; }
+        QPushButton#primaryAction { background: #1d4ed8; color: white; border-color: #1d4ed8; }
+        QPushButton#primaryAction:disabled { background: #edf1f5; color: #64748b; border-color: #cbd5e1; }
+        QLineEdit, QComboBox, QSpinBox { min-height: 22px; padding: 3px; }
+        QComboBox { min-height: 26px; padding: 4px; border: 1px solid #aebdce; border-radius: 4px; }
+        QTableWidget { gridline-color: #dbe2ea; selection-background-color: #dceafb; selection-color: #102a43; }
+        QHeaderView::section { padding: 5px; font-weight: 600; }
         #pageTitle { font-size: 24px; font-weight: 600; }
         #demoBanner, #securityNotice {
             padding: 10px; background: #fff3cd; color: #664d03;

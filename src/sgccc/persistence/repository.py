@@ -276,9 +276,12 @@ class FinanceRepository:
         alias: str,
         instrument_type: str,
         *,
+        last_four: str = '',
+        description: str = '',
         actor: str = "desktop",
     ) -> None:
         normalized_alias = alias.strip()
+        self._validate_instrument_profile(last_four, description)
         if not normalized_alias:
             raise ValueError("El nombre de la tarjeta es obligatorio.")
         if instrument_type not in {
@@ -321,6 +324,9 @@ class FinanceRepository:
                 },
                 entity_type="payment_instrument",
             )
+            if last_four or description:
+                self._insert_person_audit(connection, instrument_id, 'INSTRUMENT_PROFILE', actor, None,
+                    dict(last_four=last_four, description=description.strip()), entity_type='payment_instrument')
 
     def update_institution(
         self, institution_id: str, name: str, *, actor: str = "desktop"
@@ -335,6 +341,8 @@ class FinanceRepository:
             ).fetchone()
             if row is None:
                 raise ValueError("La institución seleccionada no existe.")
+            if connection.execute('SELECT 1 FROM institution WHERE id<>? AND lower(trim(name))=lower(trim(?))', (institution_id, normalized_name)).fetchone():
+                raise ValueError('Ya existe una institución con ese nombre.')
             try:
                 connection.execute(
                     "UPDATE institution SET name = ? WHERE id = ?",
@@ -388,6 +396,9 @@ class FinanceRepository:
         alias: str,
         instrument_type: str,
         *,
+        institution_id: str | None = None,
+        last_four: str | None = None,
+        description: str | None = None,
         actor: str = "desktop",
     ) -> None:
         normalized_alias = alias.strip()
@@ -407,14 +418,24 @@ class FinanceRepository:
             ).fetchone()
             if row is None:
                 raise ValueError("La tarjeta seleccionada no existe.")
+            target = row['institution_id'] if institution_id is None else institution_id
+            institution = connection.execute('SELECT active FROM institution WHERE id=?', (target,)).fetchone()
+            if institution is None or (target != row['institution_id'] and not institution['active']):
+                raise ValueError('Selecciona una institución activa existente.')
+            if instrument_type != row['instrument_type']:
+                history = connection.execute('SELECT 1 FROM institution_movement WHERE instrument_id=? UNION ALL SELECT 1 FROM order_record WHERE instrument_id=? LIMIT 1', (instrument_id, instrument_id)).fetchone()
+                history = history or any(connection.execute(f'SELECT 1 FROM {table} WHERE instrument_id=? LIMIT 1', (instrument_id,)).fetchone() for table in ('initial_balance', 'institution_payment', 'purchase', 'financing_plan'))
+                if row['instrument_type'] == 'WALLET_BALANCE' or history:
+                    raise ValueError('No se puede cambiar la naturaleza de una billetera o instrumento con historial.')
+            self._validate_instrument_profile(last_four if last_four is not None else '', description if description is not None else '')
             try:
                 connection.execute(
                     """
                     UPDATE payment_instrument
-                    SET alias = ?, instrument_type = ?
+                    SET alias = ?, instrument_type = ?, institution_id = ?
                     WHERE id = ?
                     """,
-                    (normalized_alias, instrument_type, instrument_id),
+                    (normalized_alias, instrument_type, target, instrument_id),
                 )
             except Exception as error:
                 if "UNIQUE constraint" in str(error):
@@ -429,13 +450,71 @@ class FinanceRepository:
                     "active": bool(row["active"]),
                 },
                 {
-                    "institution_id": row["institution_id"],
+                    "institution_id": target,
                     "alias": normalized_alias,
                     "instrument_type": instrument_type,
                     "active": bool(row["active"]),
                 },
                 entity_type="payment_instrument",
             )
+            if last_four is not None or description is not None:
+                old = self.instrument_profile(instrument_id)
+                new = dict(last_four=old['last_four'] if last_four is None else last_four,
+                           description=old['description'] if description is None else description.strip())
+                self._insert_person_audit(connection, instrument_id, 'INSTRUMENT_PROFILE', actor, old, new,
+                                          entity_type='payment_instrument')
+
+    @staticmethod
+    def _validate_instrument_profile(last_four, description):
+        if not isinstance(last_four, str) or not isinstance(description, str):
+            raise ValueError('La terminación y descripción deben ser texto.')
+        if last_four and (len(last_four) != 4 or not last_four.isascii() or not last_four.isdigit()):
+            raise ValueError('La terminación debe contener cuatro dígitos o quedar vacía.')
+
+    def instrument_profile(self, instrument_id):
+        row = self.database.connection.execute("SELECT new_value FROM audit_event WHERE entity_id=? AND action='INSTRUMENT_PROFILE' AND entity_type='payment_instrument' ORDER BY rowid DESC LIMIT 1", (instrument_id,)).fetchone()
+        return json.loads(row[0]) if row else dict(last_four='', description='')
+
+    def expected_result_breakdown(self):
+        roots = self.database.connection.execute("SELECT id FROM order_record WHERE order_status='ACTIVE' AND id NOT IN (SELECT order_id FROM product_refund_repurchase)").fetchall()
+        result = []
+        participations = self.list_collection_items()
+        for row in roots:
+            order = self.get_order(row['id'])
+            benefit = self.order_benefit_summary(row['id'], participations=participations)
+            result.append(dict(order_id=row['id'], merchant=order['merchant'], date=order['ordered_at'],
+                               family_cents=sum(int(p['sale_cents']) for p in benefit['participations'] if p['participant_role']=='FAMILY'),
+                               cost_cents=benefit['effective_purchase_cost_cents'], result_cents=benefit['expected_result_cents']))
+        return result
+
+    def family_statement(self, user_id):
+        person = self.database.connection.execute('SELECT name FROM person WHERE id=?', (user_id,)).fetchone()
+        if person is None:
+            raise ValueError('Selecciona una persona registrada.')
+        rows = []
+        for item in self.list_collection_items():
+            if item['user_id'] != user_id:
+                continue
+            concepts = []
+            order = self.get_order(item['order_id']) if item.get('order_id') else None
+            if order:
+                products = order['manual_concepts'] or (order['import_evidence'] or {}).get('products', [])
+                for product in products:
+                    shares = product.get('allocations', {})
+                    if isinstance(shares, list):
+                        shares = {p['user_id']: p['amount_cents'] for p in shares}
+                    amount = shares.get(user_id, 0)
+                    if amount:
+                        concepts.append(dict(description=product['description'], amount_cents=amount))
+            elif item.get('purchase_id'):
+                concepts = [dict(r) for r in self.database.connection.execute('SELECT p.description,SUM(a.share_cents) AS amount_cents FROM purchase_product p JOIN purchase_allocation a ON a.product_id=p.id WHERE p.purchase_id=? AND a.user_id=? GROUP BY p.id', (item['purchase_id'], user_id))]
+            receipts = [dict(r) for r in self.database.connection.execute('SELECT u.received_at,a.amount_cents FROM receipt_application a JOIN user_payment u ON u.id=a.payment_id WHERE a.receivable_id=? AND a.application_status=\'ACTIVE\' AND u.payment_status=\'ACTIVE\' ORDER BY u.received_at', (item['receivable_id'],))]
+            rows.append(dict(item, concepts=concepts, receipts=receipts,
+                             concept_adjustment_cents=int(item['sale_cents'])-sum(c['amount_cents'] for c in concepts) if concepts else 0))
+        return dict(person=person['name'], rows=rows,
+                    assigned_cents=sum(int(r['sale_cents']) for r in rows),
+                    paid_cents=sum(int(r['paid_cents']) for r in rows),
+                    remaining_cents=sum(int(r['remaining_cents']) for r in rows))
 
     def set_instrument_active(
         self, instrument_id: str, active: bool, *, actor: str = "desktop"
@@ -540,6 +619,7 @@ class FinanceRepository:
         if not merchant.strip():
             raise ValueError("El comercio es obligatorio.")
         product_results: list[tuple[ProductLine, tuple[object, ...]]] = []
+        purchased_at = self._required_iso_date(purchased_at, 'La fecha de la compra')
         total_cents = 0
         owner_cents = 0
         with self.database.transaction() as connection:
@@ -712,6 +792,7 @@ class FinanceRepository:
     ) -> None:
         if not merchant.strip():
             raise ValueError("El comercio es obligatorio.")
+        ordered_at = self._required_iso_date(ordered_at, 'La fecha del pedido')
         if original_cents < 0 or discount_cents < 0 or charged_cents < 0:
             raise ValueError("Los importes no pueden ser negativos.")
         if discount_cents > original_cents:
@@ -1500,6 +1581,13 @@ class FinanceRepository:
         except ValueError as error:
             raise ValueError(f"{label}: usa el formato AAAA-MM-DD.") from error
 
+    @classmethod
+    def _required_iso_date(cls, value, label):
+        parsed = cls._parse_iso_date(value, label)
+        if parsed is None:
+            raise ValueError(f'{label} es obligatoria; usa AAAA-MM-DD.')
+        return parsed.isoformat()
+
     @staticmethod
     def _next_month(value: date) -> date:
         year, month = value.year + (value.month == 12), 1 if value.month == 12 else value.month + 1
@@ -2019,13 +2107,16 @@ class FinanceRepository:
     ) -> None:
         if not 1 <= closing_day <= 31 or not 1 <= due_day <= 31:
             raise ValueError("Los días de corte y pago deben estar entre 1 y 31.")
+        effective_from = self._required_iso_date(effective_from, 'La fecha del calendario')
         with self.database.transaction() as connection:
             instrument = connection.execute(
-                "SELECT id FROM payment_instrument WHERE id = ? AND active = 1",
+                "SELECT id,instrument_type FROM payment_instrument WHERE id = ? AND active = 1",
                 (instrument_id,),
             ).fetchone()
             if instrument is None:
                 raise ValueError("La tarjeta seleccionada no existe o está inactiva.")
+            if instrument['instrument_type'] not in ('CREDIT_CARD', 'CREDIT_LINE'):
+                raise ValueError('Las fechas de corte y pago corresponden a crédito, no a una billetera u otro saldo.')
             current = connection.execute(
                 """
                 SELECT id, revision FROM instrument_calendar
@@ -2683,7 +2774,7 @@ class FinanceRepository:
         if row is not None and row["order_id"] is not None and row["order_status"] != "ACTIVE":
             raise ValueError("La cuenta pertenece a un pedido anulado o inexistente.")
 
-    def order_benefit_summary(self, order_id: str) -> dict[str, object]:
+    def order_benefit_summary(self, order_id: str, *, participations=None) -> dict[str, object]:
         """Read-only comparison of an original purchase and its linked replacements.
 
         Receipt applications settle participations; they do not change this
@@ -2708,7 +2799,7 @@ class FinanceRepository:
         refunds = [refund for item in active.values() for refund in item['product_refunds']]
         credited = sum(int(r['amount_cents']) for r in refunds if r['status'] == 'ACCREDITED')
         cost = sum(int(item['charged_cents']) for item in active.values()) - credited
-        participations = [item for item in self.list_collection_items() if item['order_id'] in active]
+        participations = [item for item in (self.list_collection_items() if participations is None else participations) if item['order_id'] in active]
         assigned = sum(int(item['sale_cents']) for item in participations)
         family = sum(int(item['sale_cents']) for item in participations if item['participant_role'] == 'FAMILY')
         return {
@@ -2726,7 +2817,7 @@ class FinanceRepository:
         """A consultation is evidence, never an opening balance or a movement."""
         if type(amount_cents) is not int or amount_cents < 0:
             raise ValueError('El saldo adeudado total debe ser un importe no negativo en centavos.')
-        date.fromisoformat(consulted_at)
+        consulted_at = date.fromisoformat(consulted_at).isoformat()
         with self.database.transaction() as connection:
             instrument = connection.execute('SELECT instrument_type FROM payment_instrument WHERE id=?', (instrument_id,)).fetchone()
             if instrument is None or instrument['instrument_type'] not in ('CREDIT_CARD', 'CREDIT_LINE'):
@@ -2739,6 +2830,7 @@ class FinanceRepository:
         for row in self.database.connection.execute(
                 "SELECT entity_id,new_value FROM audit_event WHERE entity_type='instrument' AND action='BANK_BALANCE_QUERIED' ORDER BY rowid"):
             value = json.loads(row['new_value'])
+            value['consulted_at'] = date.fromisoformat(value['consulted_at']).isoformat()
             previous = queries.get(row['entity_id'])
             if previous is None or value['consulted_at'] >= previous['consulted_at']:
                 queries[row['entity_id']] = value
@@ -2764,7 +2856,7 @@ class FinanceRepository:
         personal_pending = sum(int(i['remaining_cents']) for i in participations if i['participant_role'] == 'PERSONAL')
         roots = self.database.connection.execute("""SELECT id FROM order_record WHERE order_status='ACTIVE'
             AND id NOT IN (SELECT order_id FROM product_refund_repurchase)""").fetchall()
-        expected = sum(int(self.order_benefit_summary(row['id'])['expected_result_cents']) for row in roots)
+        expected = sum(int(self.order_benefit_summary(row['id'], participations=participations)['expected_result_cents']) for row in roots)
         family_received = int(self.database.connection.execute("""SELECT COALESCE(SUM(amount_cents),0)
             FROM user_payment WHERE payment_status='ACTIVE' AND payment_kind='FAMILY'""").fetchone()[0])
         payment_roles: dict[str, set[str]] = {}
@@ -2821,6 +2913,7 @@ class FinanceRepository:
             raise ValueError("El extra debe ser mayor que cero.")
         if not description.strip():
             raise ValueError("El motivo del extra es obligatorio.")
+        received_at = self._required_iso_date(received_at, 'La fecha del extra')
         with self.database.transaction() as connection:
             connection.execute(
                 """
@@ -2843,6 +2936,7 @@ class FinanceRepository:
             raise ValueError("La comisión debe ser mayor que cero.")
         if not description.strip():
             raise ValueError("La descripción de la comisión es obligatoria.")
+        incurred_at = self._required_iso_date(incurred_at, 'La fecha de la comisión')
         with self.database.transaction() as connection:
             connection.execute(
                 """
