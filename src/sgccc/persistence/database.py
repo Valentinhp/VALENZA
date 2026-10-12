@@ -18,7 +18,45 @@ class DatabaseSecurityError(RuntimeError):
     """La base solicitada no cumple el requisito de cifrado."""
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
+
+MIGRATION_15_UP = """
+CREATE TABLE subscription (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+    instrument_id TEXT NOT NULL REFERENCES payment_instrument(id),
+    next_due TEXT NOT NULL,
+    billing_day INTEGER NOT NULL CHECK(billing_day BETWEEN 1 AND 31),
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','PAUSED','CANCELLED')),
+    revision INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE subscription_allocation (
+    subscription_id TEXT NOT NULL REFERENCES subscription(id),
+    user_id TEXT NOT NULL REFERENCES person(id),
+    amount_cents INTEGER NOT NULL CHECK(amount_cents >= 0),
+    surcharge_cents INTEGER NOT NULL DEFAULT 0 CHECK(surcharge_cents >= 0),
+    PRIMARY KEY(subscription_id,user_id)
+);
+CREATE TABLE subscription_charge (
+    subscription_id TEXT NOT NULL REFERENCES subscription(id),
+    cycle_date TEXT NOT NULL,
+    order_id TEXT NOT NULL UNIQUE REFERENCES order_record(id),
+    PRIMARY KEY(subscription_id,cycle_date)
+);
+CREATE TABLE subscription_surcharge (
+    order_id TEXT NOT NULL REFERENCES order_record(id),
+    user_id TEXT NOT NULL REFERENCES person(id),
+    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+    PRIMARY KEY(order_id,user_id)
+);
+"""
+MIGRATION_15_DOWN = """
+DROP TABLE IF EXISTS subscription_surcharge;
+DROP TABLE IF EXISTS subscription_charge;
+DROP TABLE IF EXISTS subscription_allocation;
+DROP TABLE IF EXISTS subscription;
+"""
 
 MIGRATION_14_UP = """
 CREATE TABLE product_refund_repurchase (
@@ -768,9 +806,13 @@ class LocalDatabase:
                     self._execute_script(connection, MIGRATION_13_UP)
                 if current < 14 <= target:
                     self._execute_script(connection, MIGRATION_14_UP)
+                if current < 15 <= target:
+                    self._execute_script(connection, MIGRATION_15_UP)
                 connection.execute(f"PRAGMA user_version = {target}")
         elif target < current:
             with self.transaction() as connection:
+                if current >= 15 > target:
+                    self._execute_script(connection, MIGRATION_15_DOWN)
                 if current >= 14 > target:
                     self._execute_script(connection, MIGRATION_14_DOWN)
                 if current >= 13 > target:
