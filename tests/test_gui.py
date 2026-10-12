@@ -17,6 +17,14 @@ from sgccc.persistence.repository import FinanceRepository
 def application():
     app = create_application([])
     yield app
+    from PySide6.QtCore import QCoreApplication,QEvent
+    # Close demo windows too and complete WA_DeleteOnClose before Python exits.
+    QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
+    for widget in app.topLevelWidgets():
+        if isinstance(widget,MainWindow):
+            widget.close()
+    QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
+    app.processEvents()
     app.quit()
 
 
