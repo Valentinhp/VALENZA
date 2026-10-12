@@ -3,14 +3,15 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sgccc"
+name = "valenza"
 version = "0.1.0"
-description = "POC local de importacion OCR para SGCCC"
+description = "Valenza: finanzas compartidas, pedidos y administración de pagos"
 requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]
-sgccc-demo = "sgccc.gui.app:main"
+valenza = "valenza.gui.app:main"
+valenza-demo = "valenza.gui.app:main"
 
 [project.optional-dependencies]
 ocr = ["PyMuPDF>=1.24,<2", "Pillow>=10,<12"]
@@ -25,3 +26,6 @@ addopts = "-q"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"valenza.gui" = ["assets/*.png"]

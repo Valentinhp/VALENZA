@@ -26,6 +26,10 @@ def read_pdf_text(path: Path) -> str:
     try:
         document = pymupdf.open(path)
         try:
+            if document.needs_pass:
+                raise ValueError('El PDF está protegido con contraseña; abre una copia sin protección para importarlo.')
+            if not len(document):
+                raise ValueError('El PDF no contiene páginas.')
             return "\n".join(page.get_text() for page in document)
         finally:
             document.close()

@@ -1,6 +1,6 @@
-"""Interfaz de escritorio de demostración para SGCCC.
+"""Interfaz de escritorio de demostración para Valenza.
 
-The application module is loaded lazily so ``python -m sgccc.gui.app`` does
+The application module is loaded lazily so ``python -m valenza.gui.app`` does
 not import it once through the package and then a second time for execution.
 """
 

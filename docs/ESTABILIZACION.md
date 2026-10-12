@@ -1,5 +1,9 @@
 # Estabilización de la aplicación existente
 
+> Contexto histórico de la estabilización inicial. La afirmación de que
+> Suscripciones no está habilitada describe esa etapa. Consulta
+> [Estado actual](ESTADO_ACTUAL.md) para las ampliaciones posteriores.
+
 ## Qué se reutilizó
 
 Pedidos y sus conceptos/repartos, Cobros y sus aplicaciones de abonos, Tarjetas

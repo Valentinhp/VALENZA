@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from uuid import uuid4
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout, QLineEdit, QLabel,
+from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout, QBoxLayout, QLineEdit, QLabel,
                               QSizePolicy, QHeaderView,
                               QLayout,
-                              QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QCheckBox, QMessageBox, QScrollArea)
-from sgccc.ocr.order_import import money, validate
+                              QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QCheckBox, QMessageBox, QScrollArea, QTextEdit)
+from valenza.ocr.order_import import money, validate, RECEIPT_FIELD_NAMES
+from valenza.persistence.database import DATABASE_ERRORS
+from valenza.finance.refund_repurchase import refund_repurchase_amounts
+from valenza.gui.warm_finance import apply_warm_surface, FinancialSummary, line_icon
 
 
 def pesos(cents):
-    return f'{cents // 100}.{cents % 100:02d}'
+    return ('-' if cents < 0 else '') + f'{abs(cents) // 100}.{abs(cents) % 100:02d}'
 
 
 class ProductAssignment(QWidget):
@@ -139,6 +142,11 @@ class ProductRefundEditor(QWidget):
         self.repurchase_fields.hide()
         self.summary = QLabel()
         self.summary.setWordWrap(True)
+        self.outcome = QTextEdit()
+        self.outcome.setReadOnly(True)
+        self.outcome.setMinimumHeight(120)
+        self.outcome.setMaximumHeight(180)
+        self.outcome.hide()
         form.addWidget(self.product_name, 0, 0, 1, 2)
         form.addWidget(QLabel('Reembolso del PDF'), 0, 2)
         form.addWidget(self.amount, 0, 3)
@@ -147,12 +155,18 @@ class ProductRefundEditor(QWidget):
         form.addWidget(self.destination, 1, 1, 1, 2)
         form.addWidget(QLabel('Acreditado el'), 1, 3)
         form.addWidget(self.accredited_at, 1, 4)
-        form.addWidget(QLabel('Costo restante a cargo de'), 2, 0)
+        self.allocation_label = QLabel('Diferencia no reembolsada a cargo de')
+        self.allocation_label.setWordWrap(True)
+        form.addWidget(self.allocation_label, 2, 0)
         form.addWidget(self.allocation, 2, 1, 1, 2)
         form.addWidget(self.repurchase, 2, 3, 1, 2)
         form.addWidget(self.repurchase_fields, 3, 0, 1, 5)
         form.addWidget(self.summary, 4, 0, 1, 5)
+        form.addWidget(self.outcome, 5, 0, 1, 5)
         self.repurchase.toggled.connect(self.repurchase_fields.setVisible)
+        self.repurchase.toggled.connect(lambda checked: self.allocation_label.setText(
+            'Reparto final del producto (diferencia y sustituto)' if checked
+            else 'Diferencia no reembolsada a cargo de'))
         self.repurchase.toggled.connect(lambda _checked: self.changed.emit())
         self.apply_surplus.toggled.connect(lambda _checked: self.changed.emit())
         for widget in (self.repurchase_amount, self.repurchase_date):
@@ -173,16 +187,9 @@ class ProductRefundEditor(QWidget):
         self.changed.emit()
 
     def net_cost(self):
-        amount = money(self.amount.text())
-        net = self.original() - amount
-        if net < 0:
-            raise ValueError('El reembolso supera el valor original del producto.')
-        if self.repurchase.isChecked():
-            replacement = money(self.repurchase_amount.text())
-            if not 0 < replacement <= amount:
-                raise ValueError('Revisa la recompra: debe ser positiva y no superar el reembolso disponible.')
-            net = self.original() - (amount - replacement if self.apply_surplus.isChecked() else 0)
-        return net
+        return refund_repurchase_amounts(self.original(), money(self.amount.text()),
+            money(self.repurchase_amount.text()) if self.repurchase.isChecked() else None,
+            self.apply_surplus.isChecked())['final_total']
 
     def repurchase_proposal(self):
         if not self.repurchase.isChecked():
@@ -360,6 +367,7 @@ class RefundRepurchaseDialog(QDialog):
 class ImportPreview(QDialog):
     def __init__(self, repository, draft, parent=None):
         super().__init__(parent)
+        apply_warm_surface(self, 'warmPdfReview')
         self.repository, self.draft = repository, draft
         self.is_service = draft.get('kind') == 'MOBILE_TOPUP'
         self.refund_source = None
@@ -371,20 +379,26 @@ class ImportPreview(QDialog):
         root.setContentsMargins(12, 12, 12, 12)
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.scroll_area.setMinimumHeight(0)
         self.form_content = QWidget()
+        self.form_content.setObjectName('warmPdfReviewContent')
         layout = QVBoxLayout(self.form_content)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_area.setWidget(self.form_content)
         root.addWidget(self.scroll_area, 1)
         self.header = QWidget()
         self.header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         header_layout = QVBoxLayout(self.header)
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        title = QLabel('Revisar comprobante')
+        title.setObjectName('pageTitle')
+        header_layout.addWidget(title)
         essential = QGridLayout()
         essential.setColumnStretch(1, 2)
         essential.setColumnStretch(3, 1)
@@ -399,16 +413,16 @@ class ImportPreview(QDialog):
                            ('refund', 'Devolución incluida en PDF'), ('charged', 'Cargo bancario original'),
                            ('paid', 'Total pagado neto')] + (
                                [('service', 'Servicio'), ('company', 'Compañía'), ('time', 'Hora (HH:MM:SS)')]
-                               if self.is_service else []):
+                               if self.is_service else [('time', 'Hora')] if draft.get('time') else []):
             value = draft[key]
-            edit = QLineEdit('' if value is None else f'{value / 100:.2f}' if isinstance(value, int) else value)
+            edit = QLineEdit('' if value is None else pesos(value) if isinstance(value, int) else value)
             self.fields[key] = edit
             if key not in ('date', 'paid'):
                 index = len([k for k in self.fields if k not in ('date', 'paid')]) - 1
                 row, column = divmod(index, 3)
                 secondary.addWidget(QLabel(label), row * 2, column)
                 secondary.addWidget(edit, row * 2 + 1, column)
-        self.merchant = QLineEdit('Recarga ' + draft['company'] if self.is_service else 'Mercado Pago')
+        self.merchant = QLineEdit('Recarga ' + draft['company'] if self.is_service else draft.get('merchant', 'Mercado Pago'))
         self.instrument = QComboBox()
         self.instrument.addItem('Selecciona la tarjeta o medio de pago', None)
         for instrument in repository.list_instruments():
@@ -428,11 +442,27 @@ class ImportPreview(QDialog):
         warning = QLabel('\n'.join(draft['warnings']) + '\nLas participaciones suman el valor original. Descuentos y devoluciones no se reparten automáticamente.')
         warning.setWordWrap(True)
         details_layout.addWidget(warning)
+        origins = draft.get('provenance', {})
+        if origins:
+            evidence = QLabel('\n'.join(f'{RECEIPT_FIELD_NAMES[key]}: {origin}' for key, origin in origins.items()))
+            evidence.setWordWrap(True)
+            details_layout.addWidget(evidence)
+        if draft.get('source_amounts'):
+            source_values = QLabel('Importes leídos del documento:\n' + '\n'.join(
+                f"{RECEIPT_FIELD_NAMES[key]}: " + ' / '.join(entry['raw'] for entry in entries)
+                for key, entries in draft['source_amounts'].items()))
+            source_values.setWordWrap(True)
+            details_layout.addWidget(source_values)
+        self.review_confirmation = QCheckBox('Revisé y corregí los campos señalados contra el documento')
+        self.review_confirmation.setVisible(bool(draft.get('review_fields')))
+        header_layout.addWidget(self.review_confirmation)
         self.details.hide()
         self.details_toggle.toggled.connect(self.details.setVisible)
         self.details_toggle.toggled.connect(lambda expanded: self.details_toggle.setText(
             'Ocultar detalles del comprobante' if expanded else 'Mostrar detalles del comprobante'))
         header_layout.addWidget(self.details)
+        if draft.get('review_fields'):
+            self.details_toggle.setChecked(True)
         layout.addWidget(self.header, 0)
         self.people = [p for p in repository.list_people() if p['active']]
         self.table = QTableWidget(0, 4)
@@ -440,17 +470,16 @@ class ImportPreview(QDialog):
         if self.is_service:
             self.table.setHorizontalHeaderLabels(['Concepto', 'Cantidad', 'Importe', 'Persona / Dividir'])
             self.table.setMinimumHeight(110)
-        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.table.setMinimumWidth(936)
-        if self.is_service:
-            self.table.setMinimumWidth(600)
-        self.table.setMinimumHeight(300)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.table.setMinimumWidth(420)
+        self.table.setMinimumHeight(80)
+        self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)
         self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.table.verticalHeader().setMinimumSectionSize(52)
         self.table.verticalHeader().hide()
         columns = self.table.horizontalHeader()
-        columns.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        columns.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         for column in (1, 2, 3):
             columns.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(1, 76)
@@ -473,7 +502,7 @@ class ImportPreview(QDialog):
         toolbar.addWidget(self.all_for_person)
         toolbar.addStretch(1)
         layout.addLayout(toolbar, 0)
-        layout.addWidget(self.table, 1)
+        layout.addWidget(self.table, 0)
         self.refund_editor = ProductRefundEditor(self.people, repository.list_instruments(),
             lambda: self.product_original(self.refund_source), self)
         self.refund_editor.hide()
@@ -482,7 +511,8 @@ class ImportPreview(QDialog):
         self.footer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         footer_layout = QVBoxLayout(self.footer)
         footer_layout.setContentsMargins(0, 0, 0, 0)
-        self.assignment_totals = QLabel()
+        self.assignment_totals = FinancialSummary()
+        self.assignment_totals.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.assignment_totals.setWordWrap(True)
         layout.addWidget(self.assignment_totals, 0)
         self.table.itemChanged.connect(self.update_totals)
@@ -491,10 +521,13 @@ class ImportPreview(QDialog):
         self.update_totals()
         add = QPushButton('Agregar producto')
         add.clicked.connect(lambda: self.add_row(dict(description='', quantity=1, unit=0)))
-        toolbar.addWidget(add)
+        product_actions = QHBoxLayout()
+        product_actions.addWidget(add)
         remove = QPushButton('Eliminar producto seleccionado')
         remove.clicked.connect(self.remove_row)
-        toolbar.addWidget(remove)
+        product_actions.addWidget(remove)
+        product_actions.addStretch()
+        layout.insertLayout(layout.indexOf(self.table), product_actions)
         if self.is_service:
             add.hide()
             remove.hide()
@@ -505,32 +538,70 @@ class ImportPreview(QDialog):
         self.refund_toggle = QPushButton('Asignar devolución al producto seleccionado')
         self.refund_toggle.setCheckable(True)
         self.refund_toggle.clicked.connect(self._toggle_refund)
-        actions.addWidget(self.refund_toggle)
+        if not self.is_service:
+            refund_actions = QHBoxLayout()
+            refund_actions.addWidget(self.refund_toggle)
+            refund_actions.addStretch()
+            footer_layout.addLayout(refund_actions)
         self.refund_toggle.setVisible(not self.is_service)
         actions.addStretch(1)
         self.cancel_button = QPushButton('Cancelar')
         self.cancel_button.clicked.connect(self.reject)
         actions.addWidget(self.cancel_button)
         self.save_button = QPushButton('Confirmar y guardar pedido')
+        self.save_button.setObjectName('primaryAction')
         self.save_button.clicked.connect(self.save)
         actions.addWidget(self.save_button)
         footer_layout.addLayout(actions)
         root.addWidget(self.footer, 0)
+        for button in self.findChildren(QPushButton):
+            button.setIcon(line_icon('receipt', '#fffaf4' if button is self.save_button else '#b86642'))
         self.refund_editor.changed.connect(self.update_totals)
+        for key in ('discount', 'refund', 'paid', 'charged'):
+            self.fields[key].textChanged.connect(self.update_totals)
         self.table.horizontalHeader().sectionResized.connect(lambda *_: self.table.resizeRowsToContents())
+        self.details_toggle.toggled.connect(lambda *_: self._fit_review_table())
+
+    def _fit_review_table(self):
+        if not hasattr(self, 'table'):
+            return
+        self.header.layout().activate()
+        self.header.setMaximumHeight(self.header.sizeHint().height())
+        if hasattr(self, 'footer'):
+            self.footer.layout().setDirection(QBoxLayout.Direction.LeftToRight if self.width() >= 1000 else QBoxLayout.Direction.TopToBottom)
+            self.footer.layout().activate()
+            self.footer.setFixedHeight(self.footer.layout().sizeHint().height())
+            self.layout().activate()
+        width = max(420, (self.scroll_area.viewport().width() if self.isVisible() else self.width()-36)-8)
+        self.table.setColumnWidth(3, max(260, min(340, int(width * .4))))
+        self.table.setColumnWidth(0, max(150, width-self.table.columnWidth(3)-self.table.columnWidth(1)-self.table.columnWidth(2)-8))
+        self.table.resizeRowsToContents()
+        self.table.setFixedHeight(max(80, min(540, self.table.horizontalHeader().sizeHint().height()
+            + sum(self.table.rowHeight(row) for row in range(self.table.rowCount())) + 8
+            + (self.table.horizontalScrollBar().sizeHint().height() if self.table.horizontalScrollBar().maximum() else 0))))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'table'):
+            self._fit_review_table()
 
     def showEvent(self, event):
         super().showEvent(event)
         available = self.screen().availableGeometry()
         self.setMaximumHeight(max(280, available.height() - 48))
         self.resize(self.width(), min(self.height(), self.maximumHeight()))
+        self._fit_review_table()
 
     def add_row(self, product, source_index=None):
         row = self.table.rowCount()
         self.table.insertRow(row)
-        values = [product['description'], str(product['quantity']), pesos(product['unit'])]
+        values = [product['description'], '' if product['quantity'] is None else str(product['quantity']),
+                  '' if product['unit'] is None else pesos(product['unit'])]
         for column, value in enumerate(values):
-            self.table.setItem(row, column, QTableWidgetItem(value))
+            item = QTableWidgetItem(value)
+            if column in (1, 2):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, column, item)
         assignment = ProductAssignment(self.people, lambda: self.product_original(assignment), self.table)
         assignment.source_index = source_index
         self.table.setCellWidget(row, 3, assignment)
@@ -599,6 +670,88 @@ class ImportPreview(QDialog):
             assignment.person.setCurrentIndex(assignment.person.findData(person))
         self.update_totals()
 
+    def _show_refund_outcome(self, proposed, before, after, gross):
+        replacement = proposed.get('repurchase')
+        calculation = refund_repurchase_amounts(gross, proposed['amount_cents'],
+            replacement['amount_cents'] if replacement else None,
+            replacement.get('apply_surplus', False) if replacement else False)
+        credited = proposed['status'] == 'ACCREDITED'
+        effective = after if credited else before
+        lines = ['Vista previa del producto seleccionado — antes de guardar']
+        for person in self.people:
+            identity = str(person['id'])
+            name = 'Yo' if person['is_owner'] else person['name']
+            lines.append(f"{name}: antes ${pesos(before.get(identity, 0))} → después ${pesos(effective.get(identity, 0))}")
+        lines.append(f"Diferencia no reembolsada: ${pesos(calculation['difference'])}.")
+        lines.append(f"Sobrante: ${pesos(calculation['surplus'])} · Compensación propuesta: ${pesos(calculation['applied'])}.")
+        if replacement:
+            lines.append('La compensación reduce el total a repartir de la compra original. El reparto final es el que seleccionas en Persona / Dividir.')
+            lines.append('Para asumir solo la diferencia y asignar la recompra a Mamá, usa Dividir y revisa los importes de cada persona.')
+            lines.append('El selector reparte el saldo completo, no solamente la diferencia ni el destino del reembolso. La recompra no genera otra deuda familiar.')
+        responsible = [identity for identity, value in before.items() if value > 0]
+        if calculation['applied'] and len(responsible) == 1:
+            beneficiary = next((p for p in self.people if str(p['id']) == responsible[0]), None)
+            if beneficiary:
+                name = 'Yo' if beneficiary['is_owner'] else beneficiary['name']
+                decrease = before[responsible[0]] - effective.get(responsible[0], 0)
+                if credited and decrease >= calculation['applied']:
+                    lines.append(f"Compensación de ${pesos(calculation['applied'])} a favor de {name}, sobre su participación original; no es un abono que haya entregado.")
+        order_before = {str(p['id']): 0 for p in self.people}
+        for row in range(self.table.rowCount()):
+            for identity, value in self.table.cellWidget(row, 3).shares().items():
+                order_before[identity] += value
+        order_after = {identity: value - before.get(identity, 0) + effective.get(identity, 0)
+                       for identity, value in order_before.items()}
+        lines.append('Pedido completo: asignaciones antes de cualquier abono posterior')
+        for person in self.people:
+            identity = str(person['id'])
+            name = 'Yo' if person['is_owner'] else person['name']
+            other_products = order_before[identity] - before.get(identity, 0)
+            lines.append(f"{name}: otros productos ${pesos(other_products)} + producto revisado ${pesos(effective.get(identity, 0))} = ${pesos(order_after[identity])}.")
+        lines.append(f"Descuento general ${self.fields['discount'].text()}: beneficio personal separado; no se resta otra vez de las participaciones familiares.")
+        existing_applied = 0
+        existing_found = False
+        for identity in self.repository.find_import_duplicates(self.draft):
+            saved = self.repository.get_order(identity)
+            evidence = saved.get('import_evidence') or {}
+            same_receipt = (self.draft.get('fingerprint') and evidence.get('fingerprint') == self.draft['fingerprint']) or (
+                self.draft.get('number') and evidence.get('number') == self.draft['number'])
+            if not same_receipt:
+                continue
+            for refund in saved['product_refunds']:
+                if refund['product_index'] == proposed['product_index']:
+                    existing_found = True
+                    linked = refund.get('repurchase')
+                    existing_applied += int(linked['applied_cents']) if linked else 0
+        lines.append(f'Compensación ya registrada para este comprobante/producto: ${pesos(existing_applied)}.')
+        if existing_found:
+            lines.append('Esta devolución ya está registrada. No vuelvas a importarla; revisa el pedido existente. No se proyecta otro ingreso ni otra recompra en Wallet.')
+        wallet = next((card for card in self.repository.list_card_summaries(include_inactive=True)
+                       if card['instrument_id'] == proposed['destination_id'] and card['instrument_type'] == 'WALLET_BALANCE'), None)
+        wallet_after = None
+        if wallet:
+            current = wallet['wallet_balance_cents']
+            delta = 0 if existing_found or not credited else calculation['wallet_change']
+            if replacement and replacement['instrument_id'] != proposed['destination_id']:
+                lines.append('Revisa el medio de recompra: debe ser la misma Wallet que recibe el reembolso.')
+            else:
+                if not existing_found and self.instrument.currentData() == wallet['instrument_id']:
+                    delta -= money(self.fields['charged'].text())
+                wallet_after = current + delta
+                lines.append(f"Origen y destino del reembolso: {wallet['alias']}; la recompra usa ese saldo.")
+                lines.append(f"Wallet registrada ahora: ${pesos(current)} → prevista después de guardar: ${pesos(wallet_after)}.")
+                lines.append('Aplicar el sobrante al reparto NO retira dinero de Wallet ni registra un pago bancario.')
+        else:
+            lines.append('Confirma Wallet como destino para mostrar su saldo real registrado y el saldo previsto.')
+        if not credited:
+            lines.append('Reembolso pendiente: los saldos y participaciones todavía no cambian. La recompra requiere acreditación.')
+        self.refund_preview_data = dict(calculation, before=dict(before), after=dict(effective),
+                                        wallet_after=wallet_after, existing_applied=existing_applied,
+                                        existing_refund=existing_found,
+                                        order_before=order_before, order_after=order_after)
+        self.refund_editor.outcome.setPlainText('\n'.join(lines))
+        self.refund_editor.outcome.show()
+
     def update_totals(self):
         totals = {str(p['id']): 0 for p in self.people}
         original = 0
@@ -618,11 +771,25 @@ class ImportPreview(QDialog):
                 f"{'Yo' if p['is_owner'] else p['name']}: ${pesos(totals[str(p['id'])])}" for p in self.people
             ) + f'\nTotal asignado: ${pesos(sum(totals.values()))} · Valor original: ${pesos(original)}'
               + ('\nRevisa el reparto: hay productos cuyo importe no cuadra.' if incomplete else ''))
+            charge = original - money(self.fields['discount'].text())
+            if (self.draft.get('provenance', {}).get('charged') == 'sin determinar'
+                    and 'charged' not in self.draft.get('source_amounts', {})
+                    and not self.fields['charged'].text() and charge >= 0):
+                # A corrected missing discount/price now permits the same exact derivation.
+                self.fields['charged'].blockSignals(True)
+                self.fields['charged'].setText(pesos(charge))
+                self.fields['charged'].blockSignals(False)
+            calculated = charge - money(self.fields['refund'].text())
+            receipt_total = money(self.fields['paid'].text())
+            self.assignment_totals.setText(self.assignment_totals.text()
+                + f'\nTotal calculado: ${pesos(calculated)} · Neto para validar: ${pesos(receipt_total)}'
+                + f' · Diferencia: ${pesos(calculated - receipt_total)}')
             if self.refund_source is not None:
                 proposed = self._refund_proposal()
                 gross = self.product_original(self.refund_source)
                 before = self.refund_source.shares()
                 after = proposed['final_allocations']
+                self._show_refund_outcome(proposed, before, after, gross)
                 self.refund_editor.summary.setText(
                     f"Original ${pesos(gross)} · Reembolso ${pesos(proposed['amount_cents'])} · "
                     f"Diferencia / costo restante ${pesos(gross - proposed['amount_cents'])} · "
@@ -653,17 +820,28 @@ class ImportPreview(QDialog):
                 if unassigned:
                     message += ' · Devolución aún sin asignar: $' + pesos(unassigned)
                 self.assignment_totals.setText(self.assignment_totals.text().replace('\n', ' · ', 1) + message)
-        except ValueError:
+        except ValueError as error:
             self.assignment_totals.setText('Revisa las cantidades, precios y participaciones para calcular los totales.')
+            if self.refund_source is not None:
+                self.refund_editor.outcome.setPlainText('Vista previa pendiente: ' + str(error))
+                self.refund_editor.outcome.show()
+                self.refund_preview_data = None
         self.table.resizeRowsToContents()
+        self._fit_review_table()
 
     def save(self):
         try:
             if self.is_service and self.refund_source is not None:
                 raise ValueError('Una recarga no admite devoluciones de productos.')
             draft = dict(self.draft)
+            draft['review_confirmed'] = self.review_confirmation.isChecked()
             for key, edit in self.fields.items():
                 draft[key] = money(edit.text()) if key in ('discount', 'refund', 'charged', 'paid') else edit.text().strip()
+            draft['merchant'] = self.merchant.text().strip()
+            draft['review_corrections'] = {
+                key: dict(original=self.draft.get(key), confirmed=draft[key])
+                for key in self.fields if draft[key] != self.draft.get(key)
+            }
             draft['products'] = []
             totals = {str(p['id']): 0 for p in self.people}
             for row in range(self.table.rowCount()):
@@ -672,6 +850,9 @@ class ImportPreview(QDialog):
                 source_index = self.table.cellWidget(row, 3).source_index
                 if source_index is not None:
                     product['source_index'] = source_index
+                    original_product = self.draft['products'][source_index]
+                    if 'declared_subtotal' in original_product:
+                        product['declared_subtotal'] = original_product['declared_subtotal']
                 shares = self.table.cellWidget(row, 3).shares()
                 if sum(shares.values()) != product['quantity'] * product['unit']:
                     raise ValueError(f'Las participaciones del producto {row + 1} no suman su valor original.')
@@ -680,6 +861,12 @@ class ImportPreview(QDialog):
                 for person, amount in shares.items():
                     totals[person] += amount
             original = validate(draft)
+            if self.refund_source is not None:
+                proposed = self._refund_proposal()
+                self._show_refund_outcome(proposed, self.refund_source.shares(),
+                                          proposed['final_allocations'], self.product_original(self.refund_source))
+                if self.refund_preview_data['existing_refund']:
+                    raise ValueError('Esta devolución ya está registrada. Revisa el pedido existente; no se repetirá la compensación ni la recompra.')
             if self.instrument.currentData() is None:
                 raise ValueError('Selecciona una tarjeta o instrumento existente.')
             duplicates = self.repository.find_import_duplicates(draft)
@@ -694,7 +881,10 @@ class ImportPreview(QDialog):
                 allocations=tuple(dict(user_id=person, amount_cents=amount) for person, amount in totals.items()),
                 import_evidence=draft, allow_duplicate=bool(duplicates),
                 product_refunds=(self._refund_proposal(),) if self.refund_source is not None else ())
-        except (ValueError, RuntimeError) as error:
-            QMessageBox.warning(self, 'Revisa la importación', str(error))
+        except (ValueError, RuntimeError, *DATABASE_ERRORS) as error:
+            message = ('No se pudo guardar la importación. No se guardaron operaciones parciales; '
+                       'conserva la captura y revisa el almacenamiento.'
+                       if isinstance(error, DATABASE_ERRORS) else str(error))
+            QMessageBox.warning(self, 'Revisa la importación', message)
             return
         self.accept()

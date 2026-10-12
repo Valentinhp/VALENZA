@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-from sgccc.persistence.database import DatabaseSecurityError, LocalDatabase, SCHEMA_VERSION
-from sgccc.persistence.repository import FinanceRepository
+from valenza.persistence.database import DatabaseSecurityError, LocalDatabase, SCHEMA_VERSION
+from valenza.persistence.repository import FinanceRepository
 
 
 def memory_repository() -> FinanceRepository:
@@ -669,7 +669,7 @@ def test_msi_persists_exact_installments_and_periods_across_year_and_short_month
         def today(cls):
             return cls(2026, 1, 31)
 
-    monkeypatch.setattr("sgccc.persistence.repository.date", JanuaryDate)
+    monkeypatch.setattr("valenza.persistence.repository.date", JanuaryDate)
     repository = memory_repository()
     repository.add_person("owner", "Yo", is_owner=True)
     repository.add_institution("inst", "Institución")

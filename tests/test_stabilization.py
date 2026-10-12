@@ -1,7 +1,7 @@
 import pytest
 
-from sgccc.persistence.database import DatabaseSecurityError, LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.persistence.database import DatabaseSecurityError, LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 from test_product_refunds import repository, create_discount_comparison_case
 from test_personal_balance import reference_case
 
@@ -60,7 +60,7 @@ def test_card_profile_failure_rolls_back_and_institution_duplicates_are_blocked(
 
 
 def test_family_pdf_concepts_receipts_and_bank_payment_stay_separate(repository, tmp_path):
-    from sgccc.gui.app import write_family_pdf
+    from valenza.gui.app import write_family_pdf
     import pymupdf
     concepts = [dict(description='CFE octubre', amount_cents=20000, allocations={'mama': 20000}),
                 dict(description='Amazon ficticio', amount_cents=13131, allocations={'owner': 13131})]
@@ -159,7 +159,7 @@ def test_bad_restore_never_changes_active_records(tmp_path, kind):
 
 
 def test_long_family_pdf_paginates_without_losing_concepts(repository, tmp_path):
-    from sgccc.gui.app import write_family_pdf
+    from valenza.gui.app import write_family_pdf
     import pymupdf
     concepts=[dict(description=f'CFE octubre concepto ficticio {i:03d} & texto largo para revisar', amount_cents=100, allocations={'mama':100}) for i in range(80)]
     repository.create_order(order_id='long', ordered_at='2026-10-11', merchant='Ficticio', instrument_id='card',
@@ -174,7 +174,7 @@ def test_long_family_pdf_paginates_without_losing_concepts(repository, tmp_path)
 
 
 def test_main_screens_and_manual_scroll_render_small(repository, tmp_path, monkeypatch):
-    from sgccc.gui.app import MainWindow, create_application
+    from valenza.gui.app import MainWindow, create_application
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -271,7 +271,7 @@ def test_cancelled_restore_copy_keeps_active_database_and_safety(tmp_path, monke
 
 
 def test_reentrant_manual_save_records_one_charge_and_keeps_error_draft(repository, monkeypatch):
-    from sgccc.gui.app import MainWindow, create_application
+    from valenza.gui.app import MainWindow, create_application
     app=create_application([])
     window=MainWindow(database=repository.database)
     errors=[]
@@ -301,7 +301,7 @@ def test_reentrant_manual_save_records_one_charge_and_keeps_error_draft(reposito
 
 
 def test_family_report_button_uses_selected_person_and_readonly_diagnostic(repository, monkeypatch, tmp_path):
-    from sgccc.gui.app import MainWindow, create_application
+    from valenza.gui.app import MainWindow, create_application
     from PySide6.QtWidgets import QFileDialog
     import pymupdf
     app=create_application([])
@@ -327,7 +327,7 @@ def test_family_report_button_uses_selected_person_and_readonly_diagnostic(repos
 
 
 def test_authenticated_maintenance_ui_cancel_restore_and_reopen(tmp_path, monkeypatch):
-    from sgccc.gui.app import MainWindow, create_application
+    from valenza.gui.app import MainWindow, create_application
     from PySide6.QtWidgets import QFileDialog, QMessageBox
     app=create_application([])
     db,repo=encrypted_repo(tmp_path/'synthetic.db')

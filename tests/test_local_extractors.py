@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sgccc.ocr.local_extractors import fingerprint_file
+from valenza.ocr.local_extractors import fingerprint_file
 
 
 def test_fingerprint_is_stable_and_does_not_expose_filename(tmp_path: Path):

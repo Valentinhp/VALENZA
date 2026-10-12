@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from sgccc.ocr.order_import import parse_receipt
-from sgccc.persistence.database import LocalDatabase, SCHEMA_VERSION, DatabaseSecurityError
-from sgccc.persistence.repository import FinanceRepository
+from valenza.ocr.order_import import parse_receipt
+from valenza.persistence.database import LocalDatabase, SCHEMA_VERSION, DatabaseSecurityError
+from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
@@ -48,6 +48,47 @@ def summaries(repo):
 def repurchase_proposal(apply=True, split=None):
     return dict(amount_cents=12999, ordered_at='2026-10-11', instrument_id='wallet',
                 apply_surplus=apply, final_allocations=split or {'owner': 0, 'mama': 15121 if apply else 20779})
+
+
+@pytest.mark.parametrize('status,repurchase', [('PENDING', False), ('ACCREDITED', False), ('ACCREDITED', True)])
+def test_edit_imported_concepts_and_returned_product_split(repository, status, repurchase):
+    repository.create_order(**purchase_args(status=status, destination='wallet'))
+    refund_id = repository.list_product_refunds('order')[0]['id']
+    if repurchase:
+        repository.register_refund_repurchase(refund_id, repurchase_proposal())
+    original = repository.get_order('order')
+    previous = repository.editable_order_concepts(original)
+    edited = copy.deepcopy(previous)
+    edited[4]['description'] = 'Producto corregido'
+    edited[4]['allocations'] = {'owner': 20779, 'mama': 0}
+    cards = repository.list_card_summaries()
+    repository.update_manual_concepts('order', edited, expected_concepts=previous)
+    updated = repository.get_order('order')
+    assert updated['manual_concepts'] == edited
+    assert updated['import_evidence'] == original['import_evidence']
+    assert repository.list_card_summaries() == cards
+    accounts = {a['user_id']: a for a in repository.list_collection_items() if a['order_id'] == 'order'}
+    expected = 20779 if status == 'PENDING' else 15121 if repurchase else 2122
+    assert accounts['owner']['sale_cents'] == 39508 + expected
+    assert accounts['mama']['sale_cents'] == 0
+    refund = updated['product_refunds'][0]
+    assert refund['amount_cents'] == 18657 and refund['status'] == status
+    assert refund['repurchase'] == original['product_refunds'][0]['repurchase']
+
+
+def test_edit_linked_repurchase_keeps_it_funded_once(repository):
+    repository.create_order(**purchase_args(destination='wallet'))
+    linked = repository.register_refund_repurchase(repository.list_product_refunds('order')[0]['id'], repurchase_proposal())
+    previous = repository.editable_order_concepts(repository.get_order(linked))
+    edited = copy.deepcopy(previous)
+    edited[0]['description'] = 'Recompra corregida'
+    edited[0]['allocations'] = {'owner': 0, 'mama': 12999}
+    summary = repository.dashboard_summary()
+    repository.update_manual_concepts(linked, edited, expected_concepts=previous)
+    assert repository.get_order(linked)['manual_concepts'] == edited
+    assert repository.dashboard_summary()['receivables_cents'] == summary['receivables_cents']
+    assert repository.dashboard_summary()['personal_pending_cents'] == summary['personal_pending_cents']
+    assert all(a['sale_cents'] == 0 for a in repository.list_collection_items() if a['order_id'] == linked)
 
 
 @pytest.mark.parametrize('existing', [False, True])
@@ -521,7 +562,7 @@ def test_topup_in_another_bank_keeps_existing_refund_operation_unchanged(reposit
 def test_discount_details_and_dashboard_render_compactly(repository, tmp_path):
     from PySide6.QtWidgets import QLabel
     from PySide6.QtGui import QFont, QFontDatabase
-    from sgccc.gui.app import MainWindow, create_application
+    from valenza.gui.app import MainWindow, create_application
     application = create_application([])
     font_id = QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
     if font_id >= 0:

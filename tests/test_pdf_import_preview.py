@@ -4,11 +4,11 @@ import pytest
 
 pytest.importorskip('PySide6')
 from PySide6.QtWidgets import QMessageBox
-from sgccc.gui.app import create_application
-from sgccc.gui.pdf_import import ImportPreview
-from sgccc.ocr.order_import import parse_receipt
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.gui.app import create_application
+from valenza.gui.pdf_import import ImportPreview
+from valenza.ocr.order_import import parse_receipt
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
@@ -38,6 +38,71 @@ def assignment(dialog, row=0):
 
 def select(widget, person):
     widget.person.setCurrentIndex(widget.person.findData(person))
+
+
+def test_preview_and_cancel_do_not_record_orders(preview):
+    dialog, repository, _ = preview
+    assert repository.list_orders() == []
+    assert 'Total calculado: $250.00' in dialog.assignment_totals.text()
+    assert 'Diferencia: $0.00' in dialog.assignment_totals.text()
+    dialog.fields['paid'].setText('250.01')
+    assert 'Diferencia: $-0.01' in dialog.assignment_totals.text()
+    dialog.reject()
+    assert repository.list_orders() == []
+
+
+def test_database_failure_keeps_preview_and_rolls_back(preview):
+    dialog, repository, errors = preview
+    repository.database.connection.execute(
+        "CREATE TRIGGER reject_import BEFORE INSERT ON audit_event "
+        "BEGIN SELECT RAISE(ABORT, 'synthetic import failure'); END")
+    dialog.save()
+    assert errors and 'No se pudo guardar' in errors[0]
+    assert repository.list_orders() == []
+    for table in ('order_allocation', 'receivable', 'institution_movement'):
+        assert repository.database.connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+
+
+def test_ambiguous_discount_requires_correction_and_review(preview):
+    previous, repository, errors = preview
+    previous.close()
+    text = (Path(__file__).parent / 'fixtures_synthetic' / 'mp_products.txt').read_text(encoding='utf-8')
+    draft = parse_receipt(text.replace('Descuento: $20.00', 'Descuento: $20.000'), review=True)
+    dialog = ImportPreview(repository, draft)
+    dialog.instrument.setCurrentIndex(1)
+    assert dialog.review_confirmation.isVisibleTo(dialog)
+    assert dialog.fields['discount'].text() == ''
+    assert repository.list_orders() == []
+    dialog.save()
+    assert errors and repository.list_orders() == []
+    dialog.fields['discount'].setText('20.00')
+    errors.clear()
+    dialog.save()
+    assert errors and repository.list_orders() == []
+    dialog.review_confirmation.setChecked(True)
+    errors.clear()
+    dialog.save()
+    assert not errors
+    order = repository.get_order(repository.list_orders()[0]['id'])
+    assert order['charged_cents'] == 28000
+    assert order['import_evidence']['review_corrections']['discount'] == {'original': None, 'confirmed': 2000}
+    dialog.close()
+
+
+def test_unpriced_product_preview_does_not_invent_values(preview):
+    previous, repository, errors = preview
+    previous.close()
+    draft = dict(date='2026-09-21', number='', payment='', products=[
+        dict(description='Producto sin precio', quantity=None, unit=None)],
+        discount=0, refund=0, charged=None, paid=2500,
+        warnings=['Revisa el producto'], review_fields=['products'])
+    dialog = ImportPreview(repository, draft)
+    assert dialog.table.item(0, 1).text() == dialog.table.item(0, 2).text() == ''
+    dialog.instrument.setCurrentIndex(1)
+    dialog.review_confirmation.setChecked(True)
+    dialog.save()
+    assert errors and repository.list_orders() == []
+    dialog.close()
 
 
 def test_defaults_to_owner_and_saves_existing_financial_values(preview):
@@ -160,9 +225,10 @@ def test_five_products_and_fixed_footer_fit_laptop_resolution(preview):
     QApplication.processEvents()
     assert dialog.width() <= 1366 and dialog.height() <= 720
     assert dialog.details.isHidden()
-    assert dialog.table.height() > dialog.height() / 2
+    assert dialog.table.height() <= dialog.table.horizontalHeader().height() + sum(
+        dialog.table.rowHeight(row) for row in range(dialog.table.rowCount())) + 30
     assert dialog.table.rowViewportPosition(4) + dialog.table.rowHeight(4) <= dialog.table.viewport().height()
-    assert dialog.table.horizontalHeader().sectionResizeMode(0) == QHeaderView.ResizeMode.Stretch
+    assert dialog.table.horizontalHeader().sectionResizeMode(0) == QHeaderView.ResizeMode.Interactive
     assert dialog.table.textElideMode() == Qt.TextElideMode.ElideNone
     assert dialog.table.columnWidth(0) > 400
     for button in (dialog.cancel_button, dialog.save_button):

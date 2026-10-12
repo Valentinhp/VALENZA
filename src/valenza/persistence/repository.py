@@ -6,8 +6,8 @@ from calendar import monthrange
 from datetime import date, datetime, timezone
 from uuid import uuid4
 
-from sgccc.finance.models import AllocationMethod, ProductLine, RefundEvent
-from sgccc.finance.rules import allocate_line_shares, validate_refund_event
+from valenza.finance.models import AllocationMethod, ProductLine, RefundEvent
+from valenza.finance.rules import allocate_line_shares, validate_refund_event
 
 from .database import LocalDatabase
 
@@ -642,6 +642,25 @@ class FinanceRepository:
                 next_msi_cents=sum(f['amount_cents'] for f in msi if f['due_date']==first_date),next_msi_date=first_date))
         return result
 
+    def collection_monthly_summaries(self, *, as_of=None):
+        """Monthly breakdown of existing participations; never creates a debt or payment."""
+        from valenza.finance.monthly import month_totals
+        today = as_of or date.today()
+        shares = self.list_collection_items()
+        planned = self.upcoming_obligations(participations=shares)
+        msi_orders = {r[0] for r in self.database.connection.execute(
+            "SELECT f.order_id FROM financing_plan f JOIN order_record o ON o.id=f.order_id WHERE o.order_status='ACTIVE'")}
+        result = {}
+        for share in shares:
+            is_msi = share.get('order_id') in msi_orders
+            entries = [f for f in planned if f['kind']=='MSI'
+                       and f['source_id']==share.get('order_id') and f['user_id']==share['user_id']]
+            totals = month_totals(entries, today)
+            if not is_msi:
+                totals['current_cents'] = share['remaining_cents']
+            result[share['receivable_id']] = dict(totals, is_msi=is_msi, total_cents=share['remaining_cents'])
+        return result
+
     def upcoming_bank_installments(self):
         result = []
         for instrument in self.list_all_instruments():
@@ -674,7 +693,7 @@ class FinanceRepository:
                     concepts.append(dict(description='Recargo de suscripción acordado',amount_cents=fee['amount_cents']))
             elif item.get('purchase_id'):
                 concepts = [dict(r) for r in self.database.connection.execute('SELECT p.description,SUM(a.share_cents) AS amount_cents FROM purchase_product p JOIN purchase_allocation a ON a.product_id=p.id WHERE p.purchase_id=? AND a.user_id=? GROUP BY p.id', (item['purchase_id'], user_id))]
-            receipts = [dict(r) for r in self.database.connection.execute('SELECT u.received_at,a.amount_cents FROM receipt_application a JOIN user_payment u ON u.id=a.payment_id WHERE a.receivable_id=? AND a.application_status=\'ACTIVE\' AND u.payment_status=\'ACTIVE\' ORDER BY u.received_at', (item['receivable_id'],))]
+            receipts = [dict(r) for r in self.database.connection.execute('SELECT u.id AS payment_id,u.received_at,a.amount_cents FROM receipt_application a JOIN user_payment u ON u.id=a.payment_id WHERE a.receivable_id=? AND a.application_status=\'ACTIVE\' AND u.payment_status=\'ACTIVE\' ORDER BY u.received_at', (item['receivable_id'],))]
             rows.append(dict(item, concepts=concepts, receipts=receipts,
                              concept_adjustment_cents=int(item['sale_cents'])-sum(c['amount_cents'] for c in concepts) if concepts else 0,
                              financial_detail=None if not order else dict(original_cents=order['original_cents'],discount_cents=order['discount_cents'],charged_cents=order['charged_cents'],
@@ -962,10 +981,16 @@ class FinanceRepository:
         if not merchant.strip():
             raise ValueError("El comercio es obligatorio.")
         ordered_at = self._required_iso_date(ordered_at, 'La fecha del pedido')
+        if any(type(v) is not int for v in (original_cents, discount_cents, charged_cents, interest_cents)):
+            raise ValueError('Los importes deben ser centavos enteros, sin redondeo.')
         if original_cents < 0 or discount_cents < 0 or charged_cents < 0:
             raise ValueError("Los importes no pueden ser negativos.")
         if discount_cents > original_cents:
             raise ValueError("El descuento no puede exceder el importe original.")
+        if original_cents - discount_cents != charged_cents:
+            raise ValueError('No cuadra: importe original − descuento debe ser igual al cargo real.')
+        if purchase_mode == 'MSI' and charged_cents <= 0:
+            raise ValueError('Un plan MSI requiere un cargo real positivo; cero no es una mensualidad pendiente.')
         if purchase_mode not in {"CASH", "MSI"}:
             raise ValueError("El tipo de compra no es válido.")
         if interest_cents < 0:
@@ -981,7 +1006,7 @@ class FinanceRepository:
             raise ValueError("El pedido requiere al menos una asignación, incluida Yo.")
         with (self.database.transaction() if _connection is None else nullcontext(_connection)) as connection:
             if import_evidence is not None:
-                from sgccc.ocr.order_import import validate
+                from valenza.ocr.order_import import validate
                 if validate(import_evidence) != original_cents or import_evidence['discount'] != discount_cents or import_evidence['charged'] != charged_cents:
                     raise ValueError('Los importes del pedido no coinciden con la vista previa.')
                 if self.find_import_duplicates(import_evidence) and not allow_duplicate:
@@ -1002,7 +1027,9 @@ class FinanceRepository:
             owner_cents = 0
             for allocation in allocations:
                 user_id = str(allocation["user_id"])
-                amount = int(allocation["amount_cents"])
+                amount = allocation["amount_cents"]
+                if type(amount) is not int:
+                    raise ValueError('Las asignaciones deben ser centavos enteros.')
                 if user_id in seen:
                     raise ValueError("Una persona no puede repetirse en el pedido.")
                 if user_id not in people or not people[user_id]["active"]:
@@ -1237,7 +1264,10 @@ class FinanceRepository:
             raise ValueError('El saldo registrado no cubre la recompra; revisa los movimientos reales.')
         if type(proposal.get('apply_surplus', False)) is not bool:
             raise ValueError('Confirma explícitamente si se aplica el sobrante.')
-        applied = refund['amount_cents'] - amount if proposal.get('apply_surplus') else 0
+        from valenza.finance.refund_repurchase import refund_repurchase_amounts
+        calculation = refund_repurchase_amounts(refund['original_cents'], refund['amount_cents'],
+                                                amount, proposal.get('apply_surplus', False))
+        applied = calculation['applied']
         after = proposal['final_allocations']
         before = {r['user_id']: r['final_cents'] for r in connection.execute(
             'SELECT * FROM product_refund_adjustment WHERE refund_id = ?', (refund_id,))}
@@ -1245,7 +1275,7 @@ class FinanceRepository:
         allowed = {r['user_id'] for r in connection.execute('SELECT user_id FROM order_allocation WHERE order_id = ?',
                                                           (refund['order_id'],))}
         if (any(type(v) is not int or v < 0 for v in after.values())
-                or sum(after.values()) != refund['original_cents'] - applied
+                or sum(after.values()) != calculation['final_total']
                 or any(user not in people or user not in allowed for user in before.keys() | after.keys())):
             raise ValueError('Reparte exactamente el pendiente del producto original entre las personas del pedido.')
         for user in before.keys() | after.keys():
@@ -1646,15 +1676,62 @@ class FinanceRepository:
             raise ValueError('Los conceptos deben sumar el importe original del pedido.')
         return totals
 
+    def editable_order_concepts(self, order):
+        if order['manual_concepts'] is not None:
+            return order['manual_concepts']
+        products = (order['import_evidence'] or {}).get('products', [])
+        if products:
+            return [dict(description=p['description'], amount_cents=p['quantity'] * p['unit'],
+                         allocations=dict(p['allocations'])) for p in products]
+        return [dict(description=order['merchant'], amount_cents=order['original_cents'],
+                     allocations={a['user_id']: a['amount_cents'] for a in order['allocations']})]
+
+    def correct_order_charge(self, order_id, charged_cents, *, expected_charged_cents, reason, actor='desktop'):
+        """Correct bank evidence without redistributing responsibility or rewriting events."""
+        if type(charged_cents) is not int or not 0 < charged_cents <= 9223372036854775807:
+            raise ValueError('El cargo real debe ser positivo y expresado en centavos enteros.')
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('Indica el motivo de la corrección del cargo bancario.')
+        with self.database.transaction() as connection:
+            order = self.get_order(order_id)
+            if not order or order['order_status'] != 'ACTIVE':
+                raise ValueError('Solo se puede corregir un pedido activo.')
+            old = order['charged_cents']
+            if old != expected_charged_cents:
+                raise ValueError('El cargo cambió; vuelve a abrir el pedido antes de corregirlo.')
+            if old == charged_cents:
+                return
+            instrument = connection.execute('SELECT instrument_type FROM payment_instrument WHERE id=?',
+                                            (order['instrument_id'],)).fetchone()
+            if instrument['instrument_type'] not in ('CREDIT_CARD', 'CREDIT_LINE'):
+                raise ValueError('Esta opción corrige cargos de tarjeta o línea de crédito, no movimientos de Wallet.')
+            if order['purchase_mode'] == 'MSI' or connection.execute(
+                    'SELECT 1 FROM financing_plan WHERE order_id=?', (order_id,)).fetchone():
+                raise ValueError('Este pedido tiene un plan MSI. Corregir el cargo exigiría revisar sus cuotas; no se modificarán automáticamente.')
+            if connection.execute('SELECT 1 FROM subscription_charge WHERE order_id=?', (order_id,)).fetchone():
+                raise ValueError('Este cargo está vinculado a una suscripción; requiere revisar su importe contratado antes de corregirlo.')
+            if order['product_refunds'] or connection.execute(
+                    'SELECT 1 FROM product_refund_repurchase WHERE order_id=?', (order_id,)).fetchone():
+                raise ValueError('Este pedido tiene devolución o recompra vinculada. La corrección requiere revisar reembolso y compensaciones; usa su reparto existente para editar responsabilidades.')
+            if connection.execute('SELECT 1 FROM product_repurchase_adjustment WHERE order_id=?', (order_id,)).fetchone():
+                raise ValueError('Este pedido tiene compensaciones vinculadas; no se puede corregir aisladamente su cargo.')
+            if charged_cents < old and connection.execute(
+                    "SELECT 1 FROM institution_payment WHERE instrument_id=? AND payment_status='ACTIVE'",
+                    (order['instrument_id'],)).fetchone():
+                raise ValueError('La tarjeta tiene pagos bancarios activos. No se permite reducir aisladamente el cargo sin revisar su conciliación; ningún pago será alterado.')
+            connection.execute('UPDATE order_record SET charged_cents=? WHERE id=?', (charged_cents, order_id))
+            self._insert_person_audit(connection, order_id, 'ORDER_BANK_CHARGE_CORRECTED', actor,
+                {'charged_cents': old}, {'charged_cents': charged_cents, 'difference_cents': charged_cents-old,
+                 'reason': reason.strip(), 'instrument_id': order['instrument_id']}, entity_type='order')
+
     def update_manual_concepts(self, order_id, concepts, *, expected_concepts=None, actor='desktop'):
         """Edit one manual order atomically; preserve its charge, plan and receipts."""
         with self.database.transaction() as connection:
             order = self.get_order(order_id)
-            if not order or order['order_status'] != 'ACTIVE' or order['manual_concepts'] is None or order['import_evidence']:
-                raise ValueError('Selecciona un gasto manual activo con conceptos.')
-            if order['product_refunds']:
-                raise ValueError('Este pedido tiene devoluciones; utiliza sus ajustes específicos.')
-            if expected_concepts is not None and order['manual_concepts'] != expected_concepts:
+            if not order or order['order_status'] != 'ACTIVE':
+                raise ValueError('Selecciona un pedido activo.')
+            previous = self.editable_order_concepts(order)
+            if expected_concepts is not None and previous != expected_concepts:
                 raise ValueError('Los conceptos cambiaron; vuelve a abrir el pedido.')
             people = {r['id']: dict(r) for r in connection.execute('SELECT id, active, is_owner FROM person')}
             for account in order['receivables']:
@@ -1662,12 +1739,51 @@ class FinanceRepository:
                 if account['participant_role'] != expected_role:
                     raise ValueError('La configuración de Yo cambió; revisa las participaciones originales.')
             totals = self._validate_manual_concepts(concepts, order['original_cents'], people)
+            if concepts == previous:
+                return
+            if order['product_refunds']:
+                if len(concepts) != len(previous) or any(
+                        a['amount_cents'] != b['amount_cents'] for a, b in zip(concepts, previous)):
+                    raise ValueError('Con devoluciones conserva el orden y los importes de los productos; puedes editar sus nombres y repartos.')
+                for refund in order['product_refunds']:
+                    old = previous[refund['product_index']]['allocations']
+                    shares = concepts[refund['product_index']]['allocations']
+                    if shares == old:
+                        continue
+                    users = shares.keys() | {a['user_id'] for a in refund['adjustments']}
+                    gross = refund['original_cents']
+                    final_total = gross - refund['amount_cents']
+                    final = {u: final_total * shares.get(u, 0) // gross for u in users}
+                    remainder = final_total - sum(final.values())
+                    for u in sorted(users, key=lambda u: (-(final_total * shares.get(u, 0) % gross), u))[:remainder]:
+                        final[u] += 1
+                    for u in users:
+                        connection.execute('''INSERT INTO product_refund_adjustment
+                            (refund_id,user_id,original_cents,final_cents,delta_cents) VALUES (?,?,?,?,?)
+                            ON CONFLICT(refund_id,user_id) DO UPDATE SET original_cents=excluded.original_cents,
+                            final_cents=excluded.final_cents,delta_cents=excluded.delta_cents''',
+                            (refund['id'], u, shares.get(u, 0), final[u], final[u] - shares.get(u, 0)))
+                    if refund['repurchase']:
+                        net = gross - refund['repurchase']['applied_cents']
+                        net_shares = {u: net * shares.get(u, 0) // gross for u in users}
+                        remainder = net - sum(net_shares.values())
+                        for u in sorted(users, key=lambda u: (-(net * shares.get(u, 0) % gross), u))[:remainder]:
+                            net_shares[u] += 1
+                        for u in users:
+                            connection.execute('''INSERT INTO product_repurchase_adjustment VALUES (?,?,?,?)
+                                ON CONFLICT(refund_id,order_id,user_id) DO UPDATE SET delta_cents=excluded.delta_cents''',
+                                (refund['id'], order_id, u, net_shares[u] - final[u]))
+            linked = connection.execute('SELECT refund_id FROM product_refund_repurchase WHERE order_id=?', (order_id,)).fetchone()
+            if linked:
+                connection.execute('DELETE FROM product_repurchase_adjustment WHERE refund_id=? AND order_id=?', (linked['refund_id'], order_id))
+                for u, amount in totals.items():
+                    connection.execute('INSERT INTO product_repurchase_adjustment VALUES (?,?,?,?)',
+                                       (linked['refund_id'], order_id, u, -amount))
             surcharges = {r['user_id']:r['amount_cents'] for r in connection.execute('SELECT user_id,amount_cents FROM subscription_surcharge WHERE order_id=?',(order_id,))}
             for account in self.list_collection_items():
-                if account['order_id'] == order_id and totals.get(account['user_id'], 0)+surcharges.get(account['user_id'],0) < int(account['paid_cents']):
+                adjustment = int(account['sale_cents']) - next((int(a['sale_cents']) for a in order['receivables'] if a['user_id'] == account['user_id']), 0)
+                if account['order_id'] == order_id and totals.get(account['user_id'], 0)+surcharges.get(account['user_id'],0)+adjustment < int(account['paid_cents']):
                     raise ValueError('El nuevo reparto es menor que los abonos ya registrados.')
-            if concepts == order['manual_concepts']:
-                return
             existing = {a['user_id'] for a in order['allocations']}
             owner_id = next((key for key, p in people.items() if p['active'] and p['is_owner']), None)
             if owner_id is None:
@@ -1686,7 +1802,7 @@ class FinanceRepository:
             connection.execute('UPDATE order_record SET owner_cents=? WHERE id=?',
                                (sum(amount for key, amount in totals.items() if people[key]['is_owner']), order_id))
             self._insert_person_audit(connection, order_id, 'MANUAL_CONCEPTS_SAVED', actor,
-                                      order['manual_concepts'], concepts, entity_type='order')
+                                      previous, concepts, entity_type='order')
 
     def get_order(self, order_id: str) -> dict[str, object] | None:
         row = self.database.connection.execute(
@@ -1781,8 +1897,8 @@ class FinanceRepository:
         interest_cents: int,
         due_dates: tuple[str | None, ...],
     ) -> None:
-        if principal_cents < 0 or interest_cents < 0:
-            raise ValueError("Los importes financiados no pueden ser negativos.")
+        if principal_cents <= 0 or interest_cents < 0:
+            raise ValueError("El principal MSI debe ser positivo y los intereses no negativos.")
         if not due_dates:
             raise ValueError("El plan MSI requiere al menos una cuota.")
         instrument = connection.execute('SELECT instrument_type FROM payment_instrument WHERE id=?',(instrument_id,)).fetchone()
@@ -2465,6 +2581,14 @@ class FinanceRepository:
                     due_year, due_month, min(due_day, monthrange(due_year, due_month)[1])
                 ).isoformat()
             installments = self.list_installments(str(item["instrument_id"]))
+            # Due-date forecast is distinct from the total credit liability and
+            # from a confirmed bank statement period. Never sum futures into this month.
+            from valenza.finance.monthly import month_totals
+            monthly=month_totals([dict(due_date=i['due_date'],amount_cents=i['remaining_cents']) for i in installments],today)
+            item['scheduled_month_cents']=monthly['current_cents']
+            item['scheduled_overdue_cents']=monthly['overdue_cents']
+            item['scheduled_future_cents']=monthly['future_cents']
+            item['scheduled_undated_cents']=monthly['undated_cents']
             current_period = (
                 f"{today.year:04d}-{today.month:02d}"
                 if closing_day
@@ -2531,16 +2655,16 @@ class FinanceRepository:
             result.append(item)
         return result
 
-    def list_card_purchases(self, instrument_id: str) -> list[dict[str, object]]:
+    def list_card_purchases(self, instrument_id: str, *, include_cancelled: bool = False) -> list[dict[str, object]]:
         rows = self.database.connection.execute(
             """
             SELECT id, ordered_at, merchant, charged_cents, discount_cents,
                    order_status
             FROM order_record
-            WHERE instrument_id = ?
+            WHERE instrument_id = ? AND (? = 1 OR order_status = 'ACTIVE')
             ORDER BY ordered_at DESC, id DESC
             """,
-            (instrument_id,),
+            (instrument_id, int(include_cancelled)),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -2784,6 +2908,96 @@ class FinanceRepository:
                                       entity_type="participation")
         return item
 
+    def person_receipt_accounts(self, user_id, *, include_future=False, include_undated=False):
+        """Existing adjusted balances; future buckets are subsets, never extra debt."""
+        monthly = self.collection_monthly_summaries()
+        forecast = self.upcoming_obligations()
+        accounts = []
+        for item in self.list_collection_items():
+            if item['user_id'] != user_id or item['remaining_cents'] <= 0:
+                continue
+            if item['participant_role'] not in ('PERSONAL', 'FAMILY'):
+                continue
+            buckets = monthly[item['receivable_id']]
+            current = buckets['current_cents'] + buckets['overdue_cents']
+            limit = current + (buckets['future_cents'] if include_future else 0) + (buckets['undated_cents'] if include_undated else 0)
+            dates = [f['due_date'] for f in forecast if f['kind']=='MSI' and f['source_id']==item.get('order_id')
+                     and f['user_id']==user_id and f['due_date'] and
+                     (include_future or f['due_date'][:7] <= date.today().strftime('%Y-%m'))]
+            priority_date = min(dates) if dates else item['source_date'] or '9999-12-31'
+            accounts.append(dict(item, current_cents=current, future_cents=buckets['future_cents'],
+                undated_cents=buckets['undated_cents'], eligible_cents=min(limit,item['remaining_cents']),
+                priority_date=priority_date))
+        return sorted(accounts, key=lambda a:(a['current_cents']==0, a['priority_date'], a['receivable_id']))
+
+    def record_global_receipt(self, *, payment_id, user_id, amount_cents, received_at,
+                              applications, expected_balances, include_future=False,
+                              include_undated=False, reference=None, actor='desktop'):
+        """One transfer, N applications and one audit, committed together."""
+        if type(amount_cents) is not int or not 0 < amount_cents <= 9223372036854775807:
+            raise ValueError('El abono debe ser positivo y expresado en centavos enteros.')
+        if type(include_future) is not bool or type(include_undated) is not bool:
+            raise ValueError('Confirma explícitamente las mensualidades incluidas.')
+        received = self._parse_iso_date(received_at, 'La fecha del abono')
+        if received is None:
+            raise ValueError('La fecha del abono es obligatoria.')
+        if not isinstance(applications, dict) or any(type(v) is not int or v < 0 for v in applications.values()):
+            raise ValueError('Revisa los importes de la distribución.')
+        applications = {k:v for k,v in applications.items() if v}
+        if sum(applications.values()) != amount_cents:
+            raise ValueError('La distribución debe sumar exactamente el abono recibido.')
+        if not isinstance(expected_balances, dict):
+            raise ValueError('Revisa nuevamente los saldos de la vista previa.')
+        with self.database.transaction() as connection:
+            if not connection.in_transaction:
+                connection.execute('BEGIN IMMEDIATE')
+            existing = connection.execute('SELECT * FROM user_payment WHERE id=?',(payment_id,)).fetchone()
+            if existing:
+                actual = {r['receivable_id']:r['amount_cents'] for r in connection.execute(
+                    "SELECT * FROM receipt_application WHERE payment_id=? AND application_status='ACTIVE'",(payment_id,))}
+                if (existing['payment_status']=='ACTIVE' and existing['user_id']==user_id and
+                    existing['amount_cents']==amount_cents and existing['received_at']==received.isoformat() and
+                    existing['reference']==reference and actual==applications):
+                    return False
+                raise ValueError('Esta operación ya fue registrada; no se puede reutilizar su identificador.')
+            person = connection.execute('SELECT active,is_owner FROM person WHERE id=?',(user_id,)).fetchone()
+            if not person or not person['active']:
+                raise ValueError('Selecciona una persona activa.')
+            role = 'PERSONAL' if person['is_owner'] else 'FAMILY'
+            eligible = {i['receivable_id']:i for i in self.person_receipt_accounts(user_id,
+                include_future=include_future,include_undated=include_undated)}
+            tracked = []
+            for identity, amount in applications.items():
+                item = eligible.get(identity)
+                if not item or item['participant_role'] != role:
+                    raise ValueError('No se pueden mezclar personas, participaciones personales y familiares o pedidos anulados.')
+                if expected_balances.get(identity) != item['remaining_cents']:
+                    raise ValueError('Los saldos cambiaron desde la vista previa. Revisa nuevamente la distribución.')
+                if amount > item['eligible_cents']:
+                    raise ValueError('Un importe supera el pendiente elegible; confirma futuros o cuotas sin fecha cuando corresponda.')
+                if item['virtual']:
+                    connection.execute('''INSERT INTO receivable
+                        (id,user_id,purchase_id,order_id,source_type,sale_cents,attributable_cost_cents,participant_role)
+                        VALUES (?,?,?,?, 'ORDER',?,?,?)''', (identity,user_id,item['purchase_id'],item['order_id'],
+                        item['sale_cents'],item['sale_cents'],role))
+                    tracked.append(identity)
+                self._require_active_receivable(connection, identity)
+            connection.execute('''INSERT INTO user_payment(id,user_id,received_at,amount_cents,reference,payment_kind)
+                VALUES (?,?,?,?,?,?)''',(payment_id,user_id,received.isoformat(),amount_cents,reference,role))
+            for identity, amount in applications.items():
+                connection.execute('INSERT INTO receipt_application(payment_id,receivable_id,amount_cents) VALUES (?,?,?)',
+                                   (payment_id,identity,amount))
+            self._insert_person_audit(connection,payment_id,'GLOBAL_RECEIPT_RECORDED',actor,None,
+                dict(user_id=user_id,amount_cents=amount_cents,applications=applications,expected_balances=expected_balances,
+                     include_future=include_future,include_undated=include_undated,payment_kind=role,
+                     received_at=received.isoformat(),reference=reference,tracking_started=tracked,
+                     eligibility_as_of=date.today().isoformat()),entity_type='receipt')
+        return True
+
+    def is_global_receipt(self, payment_id):
+        return bool(self.database.connection.execute(
+            "SELECT 1 FROM audit_event WHERE entity_id=? AND action='GLOBAL_RECEIPT_RECORDED'", (payment_id,)).fetchone())
+
     def record_receipt(
         self,
         *,
@@ -2862,6 +3076,8 @@ class FinanceRepository:
             ).fetchone()
             if row is None or row["payment_status"] == "CANCELLED":
                 raise ValueError("El abono seleccionado no existe o está anulado.")
+            if self.is_global_receipt(payment_id) and amount_cents != row['amount_cents']:
+                raise ValueError('En un abono global puedes editar fecha y referencia. Para cambiar el importe o distribución, anula el abono completo y registra el correcto; se conserva la auditoría.')
             applications = connection.execute(
                 """
                 SELECT receivable_id, amount_cents
@@ -3075,6 +3291,10 @@ class FinanceRepository:
             query = queries.get(card['instrument_id'])
             result.append(dict(instrument_id=card['instrument_id'], alias=card['alias'],
                 institution_name=card['institution_name'], calculated_cents=int(card['remaining_cents']),
+                current_month_cents=max(0, int(card['remaining_cents'])
+                    - int(card['scheduled_future_cents'])
+                    - int(card['scheduled_overdue_cents'])
+                    - int(card['scheduled_undated_cents'])),
                 reported_cents=query['amount_cents'] if query else None,
                 consulted_at=query['consulted_at'] if query else None,
                 difference_cents=query['amount_cents'] - int(card['remaining_cents']) if query else None))
@@ -3135,6 +3355,10 @@ class FinanceRepository:
             "personal_pending_cents": sum(int(i["remaining_cents"]) for i in participations if i["participant_role"] == "PERSONAL"),
             "unclassified_pending_cents": sum(int(i["remaining_cents"]) for i in participations if i["participant_role"] == "UNKNOWN"),
             "institutional_balance_cents": sum(int(item["remaining_cents"]) for item in cards),
+            'scheduled_month_cents': sum(int(item['scheduled_month_cents']) for item in cards),
+            'scheduled_overdue_cents': sum(int(item['scheduled_overdue_cents']) for item in cards),
+            'scheduled_future_cents': sum(int(item['scheduled_future_cents']) for item in cards),
+            'scheduled_undated_cents': sum(int(item['scheduled_undated_cents']) for item in cards),
             "credit_cents": sum(int(item["credit_cents"]) for item in cards),
             "recent_movements": movements,
         }

@@ -1,7 +1,7 @@
 import pytest
 from test_product_refunds import repository
-from sgccc.persistence.database import LocalDatabase, SCHEMA_VERSION, DatabaseSecurityError
-from sgccc.persistence.repository import FinanceRepository
+from valenza.persistence.database import LocalDatabase, SCHEMA_VERSION, DatabaseSecurityError
+from valenza.persistence.repository import FinanceRepository
 
 
 def subscription(repo, **changes):
@@ -120,7 +120,7 @@ def test_encrypted_migration_and_persistence(tmp_path):
 
 
 def test_subscription_ui_small_and_save(repository,monkeypatch,tmp_path):
-    from sgccc.gui.app import MainWindow,create_application
+    from valenza.gui.app import MainWindow,create_application
     from PySide6.QtCore import QTimer
     from PySide6.QtGui import QFont,QFontDatabase
     from PySide6.QtWidgets import QDialog,QLineEdit,QPushButton

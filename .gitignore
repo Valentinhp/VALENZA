@@ -69,6 +69,7 @@ config.local.*
 # Documentos/capturas personales; excepciones sintéticas auditadas
 *.pdf
 *.png
+!src/valenza/gui/assets/*.png
 *.jpg
 *.jpeg
 *.tiff
@@ -92,3 +93,8 @@ logs/
 *~
 Thumbs.db
 Desktop.ini
+
+# Resultados generados y material de trabajo local
+/output/
+/tmp/
+/logos/*.png

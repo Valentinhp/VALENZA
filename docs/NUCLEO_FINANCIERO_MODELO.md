@@ -1,8 +1,12 @@
-# Núcleo financiero inicial de SGCCC
+# Núcleo financiero inicial de Valenza
+
+> Documento del incremento inicial, conservado como referencia de diseño.
+> El proyecto actual incluye persistencia, interfaz e importación; consulta
+> [Estado actual](ESTADO_ACTUAL.md).
 
 ## Alcance de este incremento
 
-Se implementó un modelo de dominio puro en `src/sgccc/finance`. No se creó una base de datos, migración ni conexión con OCR. Todas las operaciones monetarias usan enteros en centavos; `Decimal` solo se usa internamente para redondeo proporcional determinista.
+Se implementó un modelo de dominio puro en `src/valenza/finance`. No se creó una base de datos, migración ni conexión con OCR. Todas las operaciones monetarias usan enteros en centavos; `Decimal` solo se usa internamente para redondeo proporcional determinista.
 
 ## Entidades propuestas
 

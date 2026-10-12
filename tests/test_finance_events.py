@@ -1,6 +1,6 @@
 import pytest
 
-from sgccc.finance.models import (
+from valenza.finance.models import (
     BonusEvent,
     BonusStatus,
     InitialBalance,
@@ -14,7 +14,7 @@ from sgccc.finance.models import (
     RefundEvent,
     UserPayment,
 )
-from sgccc.finance.rules import (
+from valenza.finance.rules import (
     accept_match_suggestion,
     assign_installment_period,
     confirmed_bonus_effect,

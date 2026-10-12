@@ -1,7 +1,7 @@
 import pytest
 from test_product_refunds import repository,purchase_args
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 DATES=('2026-11-30','2026-12-30','2027-01-30')
@@ -117,7 +117,7 @@ def test_wallet_cannot_become_msi_and_dates_remain_ordered(repository):
 
 
 def test_msi_ui_link_and_dynamic_small_dialog(repository,monkeypatch,tmp_path):
-    from sgccc.gui.app import MainWindow,create_application
+    from valenza.gui.app import MainWindow,create_application
     from PySide6.QtCore import QTimer
     from PySide6.QtGui import QFont,QFontDatabase
     from PySide6.QtWidgets import QDialog,QLineEdit,QPushButton

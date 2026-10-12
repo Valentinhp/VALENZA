@@ -53,20 +53,20 @@ def main() -> None:
         (
             "pdf_native_mp",
             "from pathlib import Path; "
-            "from sgccc.ocr.local_extractors import read_pdf_text; "
+            "from valenza.ocr.local_extractors import read_pdf_text; "
             f"print(len(read_pdf_text(Path(r'{FIXTURES / 'mercado_pago_receipt.pdf'}'))))",
         ),
         (
             "png_ocr_mp",
             "from pathlib import Path; "
-            "from sgccc.ocr.local_extractors import read_image_text; "
+            "from valenza.ocr.local_extractors import read_image_text; "
             f"print(len(read_image_text(Path(r'{FIXTURES / 'mercado_pago_receipt.png'}'), "
             f"executable=r'{TESSERACT}')))",
         ),
         (
             "jpeg_ocr_nu",
             "from pathlib import Path; "
-            "from sgccc.ocr.local_extractors import read_image_text; "
+            "from valenza.ocr.local_extractors import read_image_text; "
             f"print(len(read_image_text(Path(r'{FIXTURES / 'nu_transactions.jpg'}'), "
             f"executable=r'{TESSERACT}')))",
         ),

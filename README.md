@@ -1,7 +1,7 @@
 # Valenza
 
-Aplicación financiera local en Python, PySide6 y SQLCipher. El paquete mantiene
-el nombre técnico `sgccc`. Separa participaciones personales y familiares,
+Aplicación financiera local en Python, PySide6 y SQLCipher. El paquete Python
+se llama `valenza` (antes `sgccc`). Separa participaciones personales y familiares,
 abonos recibidos y pagos reales a instituciones.
 
 ## Instalación
@@ -23,24 +23,29 @@ cifrado se limita a pruebas sintéticas explícitas en memoria.
 ## Ejecución
 
 ```powershell
-.\.venv\Scripts\python.exe -m sgccc.gui.app
+.\.venv\Scripts\python.exe -m valenza.gui.app
 ```
 
+También puedes ejecutar `Abrir-Valenza.cmd` desde la carpeta del proyecto una
+vez instalado el entorno. Los logos de ejecución están incluidos en el paquete.
+
 La clave local se solicita en la interfaz y no debe guardarse en Git. En Windows
-la base habitual se encuentra en `%USERPROFILE%/AppData/Local/SGCCC/sgccc.db`.
+la base habitual se encuentra en `%USERPROFILE%/AppData/Local/Valenza/valenza.db`.
+Si ya tienes una base en la antigua carpeta `SGCCC`, Valenza la sigue usando
+en su ubicación original, sin moverla ni duplicarla. Esto también aplica a la base de pruebas.
 Las migraciones de bases existentes crean y verifican un respaldo cifrado antes
 de actualizar el esquema. Una clave incorrecta no reemplaza la base existente.
 
 Para explorar sin abrir archivos de base de datos:
 
 ```powershell
-.\.venv\Scripts\python.exe -m sgccc.gui.app --demo
+.\.venv\Scripts\python.exe -m valenza.gui.app --demo
 ```
 
-`--test-database` abre una base separada `sgccc-test.db` en el directorio de datos
+`--test-database` abre una base separada `valenza-test.db` en el directorio de datos
 y muestra una identificación permanente. Nunca uses una base personal para
-desarrollo. El comando instalado `sgccc-demo` conserva su nombre por
-compatibilidad: sin `--demo` también abre la base habitual.
+desarrollo. El comando instalado `valenza` inicia la aplicación;
+`valenza-demo --demo` permite explorar datos sintéticos.
 
 ## Funciones
 
@@ -49,12 +54,20 @@ compatibilidad: sin `--demo` también abre la base habitual.
 - Devoluciones y recompras vinculadas: movimientos y ajustes auditables separados.
 - Cobros: participaciones y abonos. Tarjetas: cargos y pagos bancarios reales.
 - Inicio: indicadores separados, descuentos personales, resultado previsto y
-  comparación con consultas manuales de deuda bancaria.
+  comparación con consultas manuales de deuda bancaria, compromisos por mes,
+  distribución del pendiente y calendario MSI.
+- Suscripciones: alta, edición, pausa, cancelación y registro o vinculación de
+  cargos reales. Las previsiones no crean automáticamente deuda bancaria.
+- Cobros y Tarjetas: desglose por persona e instrumento, historial y acciones
+  de registro con la presentación Warm Finance.
+- Reportes familiares y recibos globales por persona en PDF, con conceptos,
+  abonos, devoluciones y previsiones identificados por separado.
 
 Los descuentos no reducen automáticamente las participaciones familiares.
 Una compensación familiar no es un pago bancario; una consulta bancaria no crea
-movimientos. El resultado previsto no representa dinero cobrado. Suscripciones
-permanece pendiente; MSI requiere calendarios y aplicaciones de pagos confirmadas.
+movimientos. El resultado previsto no representa dinero cobrado. MSI requiere
+calendarios y aplicaciones de pagos confirmadas; los periodos sin confirmación
+bancaria se identifican como previsiones.
 No existe conciliación bancaria automática ni OCR en la nube.
 
 ## Pruebas
@@ -78,6 +91,10 @@ Para regenerar los cuatro documentos sintéticos básicos:
 
 Los demás fixtures de importación se conservan versionados. `docs/` contiene
 modelos y notas históricas de etapas anteriores; este README describe la ejecución actual.
+Consulta [Actualizaciones recientes](CHANGELOG.md) y
+[Estado actual y límites conocidos](docs/ESTADO_ACTUAL.md).
+La [validación de esta actualización](docs/VALIDACION_2026-10-12.md) registra
+los resultados de pruebas y empaquetado.
 
 ## Git y recuperación
 

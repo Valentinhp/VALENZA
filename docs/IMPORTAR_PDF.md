@@ -1,6 +1,6 @@
 # Importación local de Pedidos
 
-Instala las dependencias del proyecto con `pip install -e ".[gui,ocr,test]"` en el entorno virtual. Inicia `sgccc-demo` con tu base habitual.
+Instala las dependencias del proyecto con `pip install -e ".[gui,ocr,cipher,test]"` en el entorno virtual. Para desarrollar, usa `valenza --test-database` con una base independiente. `valenza --demo` permite explorar datos sintéticos sin abrir archivos de base de datos.
 
 1. Configura Yo, las personas y una tarjeta o instrumento activo en los módulos existentes.
 2. En Pedidos selecciona **Importar PDF** y abre `tests/fixtures_synthetic/mp_products.pdf`. Todos sus datos son ficticios.
@@ -12,9 +12,11 @@ Instala las dependencias del proyecto con `pip install -e ".[gui,ocr,test]"` en 
 
 ## Límites de esta versión
 
-Solo Mercado Pago, MXN y cantidades enteras. Reconoce filas con `descripción | cantidad | precio unitario | subtotal`, `descripción cantidad x $precio` y bloques con etiquetas Cantidad / Precio unitario. Los diseños distintos requieren completar o corregir la vista previa; no se adivinan productos ni importes. Los centavos deben aparecer en el texto como decimales; diseños que separan visualmente pesos y centavos requieren revisión manual.
+Solo Mercado Pago, MXN y cantidades enteras. Reconoce filas con `descripción | cantidad | precio unitario | subtotal`, `descripción cantidad x $precio` y bloques con etiquetas Cantidad / Precio unitario. También reconoce el comprobante con Concepto y precios por unidad, con o sin resumen «Productos (N)», uniendo descripciones en varias líneas. Recupera centavos elevados únicamente cuando la posición y tipografía del PDF permiten identificarlos; no deduce decimales de números concatenados sin esa evidencia. Los diseños distintos requieren completar o corregir la vista previa; no se adivinan productos ni importes.
 
-La igualdad requerida es productos − descuento = cargo original y cargo original − devolución = neto pagado. En documentos donde “total pagado” significa el cargo antes de devolución, corrige el campo neto al revisar. Sin cargo explícito se propone el total pagado y se advierte; no se infiere el cargo sumando una devolución.
+La igualdad requerida es productos − descuento = cargo original y cargo original − devolución = neto pagado. El cargo explícito se conserva; cuando no está indicado se calcula desde los productos y el descuento reconocido. Si “total pagado” coincide exactamente con el cargo antes de una devolución explícita, se conserva el importe leído y se calcula el neto por separado. Los detalles muestran importes originales y cuáles valores son explícitos, calculados o no indicados. No se deducen descuentos de diferencias ni se inventan productos para cuadrar.
+
+Se admiten descuentos negativos (por ejemplo `$ -20.25`), decimales con punto o coma y separadores de miles válidos. Los importes ambiguos o incompletos se muestran con advertencias y campos pendientes, sin registrar movimientos. Después de corregirlos contra el documento se requiere confirmar su revisión; esta confirmación no permite saltarse las ecuaciones financieras, cantidades, subtotales ni el número de productos declarado. Un PDF con texto breve no se descarta por un umbral de caracteres. Sin texto se conserva el OCR local opcional, sin instalar dependencias.
 
 Para asociar una devolución, selecciona el producto importado y pulsa **Asignar devolución al producto seleccionado**. Se propone el importe que ya figura en el PDF; confirma el importe, el instrumento de destino y **Pendiente** o **Acreditado**. Acreditado requiere la fecha real, sin fecha propuesta automáticamente. Usa **Costo restante a cargo de** para elegir quién sigue debiendo la diferencia; **Dividir** permite introducir las participaciones finales. El pedido y sus participaciones originales se conservan, con ajustes auditables aparte. Esta etapa permite asignar una devolución por importación; el resto, si existe, queda explícitamente sin asignar.
 

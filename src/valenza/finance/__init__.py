@@ -1,4 +1,4 @@
-"""Nucleo financiero puro de SGCCC, sin persistencia ni OCR."""
+"""Nucleo financiero puro de Valenza, sin persistencia ni OCR."""
 
 from .models import (
     AllocationMethod,

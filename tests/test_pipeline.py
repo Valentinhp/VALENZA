@@ -1,5 +1,5 @@
-from sgccc.ocr.models import DocumentKind, MovementKind
-from sgccc.ocr.pipeline import analyze_text
+from valenza.ocr.models import DocumentKind, MovementKind
+from valenza.ocr.pipeline import analyze_text
 
 
 def test_mercado_pago_wallet_does_not_become_credit():

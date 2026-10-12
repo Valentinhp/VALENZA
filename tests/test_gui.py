@@ -8,9 +8,9 @@ PySide6 = pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QListWidget
 
-from sgccc.gui.app import MainWindow, create_application
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.gui.app import MainWindow, create_application
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
@@ -114,8 +114,8 @@ def test_gui_package_does_not_preload_application_module():
             "-W",
             "error",
             "-c",
-            "import sys; import sgccc.gui; "
-            "assert 'sgccc.gui.app' not in sys.modules",
+            "import sys; import valenza.gui; "
+            "assert 'valenza.gui.app' not in sys.modules",
         ],
         capture_output=True,
         text=True,
@@ -204,7 +204,7 @@ def test_persistent_dashboard_uses_active_operations_and_keeps_bank_debt_separat
     assert amount(window.dashboard_receivables) == "$0.00 MXN"
     assert amount(window.dashboard_debt) == "$0.00 MXN"
     repository.create_order(order_id="a", ordered_at="2026-10-10", merchant="Comercio",
-        instrument_id="card", original_cents=10000, discount_cents=0, charged_cents=8000,
+        instrument_id="card", original_cents=10000, discount_cents=2000, charged_cents=8000,
         allocations=({"user_id":"owner", "amount_cents":4000},
                      {"user_id":"j", "amount_cents":6000}))
     window.data_changed.emit("orders")
@@ -230,7 +230,7 @@ def test_persistent_window_is_not_labelled_demonstration(application, tmp_path):
     database = LocalDatabase.open(tmp_path / "operational.db", "synthetic-only")
     database.migrate()
     window = MainWindow(database=database)
-    assert window.windowTitle() == "SGCCC"
+    assert window.windowTitle() == "Valenza"
     window.close()
 
 
@@ -323,7 +323,7 @@ def test_edit_order_merchant_preserves_amounts_and_refreshes_collections(applica
 
 
 def test_demo_cli_does_not_open_any_database(monkeypatch):
-    import sgccc.gui.app as module
+    import valenza.gui.app as module
 
     class DemoApplication:
         def exec(self):
@@ -336,7 +336,7 @@ def test_demo_cli_does_not_open_any_database(monkeypatch):
         def show(self):
             pass
 
-    monkeypatch.setattr(sys, "argv", ["sgccc", "--demo"])
+    monkeypatch.setattr(sys, "argv", ["valenza", "--demo"])
     monkeypatch.setattr(module, "create_application", lambda: DemoApplication())
     monkeypatch.setattr(module, "MainWindow", DemoWindow)
     monkeypatch.setattr(module, "open_database_with_prompt", lambda *args: pytest.fail("Se intentó abrir una base"))

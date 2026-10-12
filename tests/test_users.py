@@ -1,15 +1,28 @@
-from sgccc.persistence.database import SCHEMA_VERSION
+from valenza.persistence.database import SCHEMA_VERSION
 
 import pytest
 
 PySide6 = pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QListWidget, QMessageBox, QInputDialog
+from PySide6.QtWidgets import QListWidget, QMessageBox, QDialog
 
-from sgccc.gui import MainWindow as LazyMainWindow
-from sgccc.gui.app import MainWindow, create_application, open_database_with_prompt
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.gui import MainWindow as LazyMainWindow
+from valenza.gui.app import MainWindow, create_application, open_database_with_prompt
+from valenza.gui.unlock import UnlockDialog
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
+
+
+def mock_unlock_attempts(monkeypatch, attempts):
+    """Supply credentials through the current unlock dialog without a modal wait."""
+    attempts = iter(attempts)
+
+    def execute(dialog):
+        password, accepted = next(attempts)
+        dialog.password.setText(password)
+        return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(UnlockDialog, "exec", execute)
 
 
 @pytest.fixture
@@ -246,15 +259,13 @@ def test_wrong_password_can_retry_and_preserves_original_data(
     repository.create_person("No se debe perder", actor="test")
     database.close()
 
-    attempts = iter(
+    attempts = (
         [
             ("wrong-password", True),
             ("correct-password", True),
         ]
     )
-    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: next(attempts))
-    decisions = iter([QMessageBox.StandardButton.Retry])
-    monkeypatch.setattr(QMessageBox, "critical", lambda *args, **kwargs: next(decisions))
+    mock_unlock_attempts(monkeypatch, attempts)
 
     reopened = open_database_with_prompt(application, path)
     assert reopened is not None
@@ -273,16 +284,7 @@ def test_wrong_password_can_be_cancelled_without_replacing_database(
     database.close()
     original_bytes = path.read_bytes()
 
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        lambda *args, **kwargs: ("wrong-password", True),
-    )
-    monkeypatch.setattr(
-        QMessageBox,
-        "critical",
-        lambda *args, **kwargs: QMessageBox.StandardButton.Cancel,
-    )
+    mock_unlock_attempts(monkeypatch, [("wrong-password", True), ("", False)])
 
     assert open_database_with_prompt(application, path) is None
     assert path.read_bytes() == original_bytes
@@ -294,7 +296,7 @@ def test_opening_old_synthetic_database_verifies_backup_before_upgrade(applicati
     database.migrate(target=10)
     FinanceRepository(database).create_person("Conservar", actor="test")
     database.close()
-    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("synthetic-only", True))
+    mock_unlock_attempts(monkeypatch, [("synthetic-only", True)])
     messages = []
     monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[2]))
     upgraded = open_database_with_prompt(application, path)

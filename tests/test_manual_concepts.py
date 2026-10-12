@@ -1,8 +1,8 @@
 import copy
 import pytest
 
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
@@ -135,7 +135,7 @@ def test_concepts_survive_encrypted_reopen(repository, tmp_path):
 
 @pytest.mark.parametrize('size', [(760, 580), (520, 320)])
 def test_manual_dialog_draft_catalogs_save_and_edit(repository, monkeypatch, tmp_path, size):
-    from sgccc.gui.app import MainWindow, create_application
+    from valenza.gui.app import MainWindow, create_application
     from PySide6.QtWidgets import QMessageBox
     from PySide6.QtGui import QFont, QFontDatabase
     app = create_application([])
@@ -191,6 +191,7 @@ def test_manual_dialog_draft_catalogs_save_and_edit(repository, monkeypatch, tmp
     window.save_order_button.click()
     app.processEvents()
     assert not errors and not window.manual_dialog.isVisible()
+    assert not window._manual_started and not window.order_merchant.text()
     assert len(repository.list_orders()) == 1
     window.orders_table.selectRow(0)
     window._edit_manual_expense()
@@ -199,6 +200,7 @@ def test_manual_dialog_draft_catalogs_save_and_edit(repository, monkeypatch, tmp
     assignment.person.setCurrentIndex(assignment.person.findData('family'))
     window._save_order()
     assert not errors and len(repository.list_orders()) == 1
+    assert not window._manual_started and not window.order_merchant.text()
     order = repository.get_order(repository.list_orders()[0]['id'])
     assert order['manual_concepts'][0]['description'] == 'Libro editado después de guardar'
     assert order['charged_cents'] == 32000 and order['owner_cents'] == 2500
@@ -208,5 +210,6 @@ def test_manual_dialog_draft_catalogs_save_and_edit(repository, monkeypatch, tmp
     window.manual_concepts.item(0, 0).setText('Cambio cancelado')
     window.cancel_manual_button.click()
     assert window.manual_edit_id is None
+    assert not window._manual_started and not window.order_merchant.text()
     assert repository.get_order(order['id'])['manual_concepts'][0]['description'] == 'Libro editado después de guardar'
     window.close()

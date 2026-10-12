@@ -3,9 +3,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from sgccc.ocr.local_extractors import read_image_text, read_pdf_text
-from sgccc.ocr.models import DocumentKind, MovementKind
-from sgccc.ocr.pipeline import analyze_text
+from valenza.ocr.local_extractors import read_image_text, read_pdf_text
+from valenza.ocr.models import DocumentKind, MovementKind
+from valenza.ocr.pipeline import analyze_text
 
 
 FIXTURES = Path(__file__).parent / "fixtures_synthetic"

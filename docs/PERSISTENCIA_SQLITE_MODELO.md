@@ -1,5 +1,9 @@
 # Persistencia local: esquema propuesto y estado
 
+> Especificación histórica con estados de distintas etapas. Para instalación,
+> funciones y límites vigentes, consulta [Estado actual](ESTADO_ACTUAL.md)
+> y el [README](../README.md).
+
 ## Restricción de seguridad
 
 La especificación exige SQLCipher para datos financieros persistentes. La verificación del entorno actual encontró:

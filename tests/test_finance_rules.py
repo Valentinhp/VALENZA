@@ -1,6 +1,6 @@
 import pytest
 
-from sgccc.finance.models import (
+from valenza.finance.models import (
     Allocation,
     AllocationMethod,
     PaymentInstrumentType,
@@ -9,7 +9,7 @@ from sgccc.finance.models import (
     ReceiptApplication,
     UserPayment,
 )
-from sgccc.finance.rules import (
+from valenza.finance.rules import (
     build_financing_plan,
     internal_cost_by_user,
     prorate_discount,

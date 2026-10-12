@@ -1,8 +1,8 @@
 import pytest
 
 from test_product_refunds import repository, create_discount_comparison_case
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 def reference_case(repo):
@@ -83,7 +83,7 @@ def test_bank_consultation_survives_encrypted_reopen(tmp_path):
 
 
 def test_compact_home_bank_query_and_manual_form(repository, monkeypatch, tmp_path):
-    from sgccc.gui.app import MainWindow, create_application
+    from valenza.gui.app import MainWindow, create_application
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtWidgets import QLabel, QScrollArea
     app = create_application([])

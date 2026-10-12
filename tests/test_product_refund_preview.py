@@ -4,11 +4,11 @@ import pytest
 
 pytest.importorskip('PySide6')
 from PySide6.QtWidgets import QApplication, QMessageBox, QInputDialog
-from sgccc.gui.app import create_application, MainWindow
-from sgccc.gui.pdf_import import ImportPreview
-from sgccc.ocr.order_import import parse_receipt
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.gui.app import create_application, MainWindow
+from valenza.gui.pdf_import import ImportPreview
+from valenza.ocr.order_import import parse_receipt
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
@@ -57,6 +57,101 @@ def configure_repurchase(dialog):
     return editor
 
 
+def test_personal_difference_family_repurchase_preview_matches_saved_result(preview, tmp_path):
+    dialog, repo, errors = preview
+    editor = configure_repurchase(dialog)
+    editor.allocation.divide.setChecked(True)
+    editor.allocation.amounts['owner'].setText('21.22')
+    editor.allocation.amounts['mama'].setText('129.99')
+    before_changes = repo.database.connection.total_changes
+    dialog.update_totals()
+    result = dialog.refund_preview_data
+    assert result['before'] == {'owner':0,'mama':20779}
+    assert result['after'] == {'owner':2122,'mama':12999}
+    assert result['applied'] == result['wallet_after'] == 5658
+    assert result['existing_applied'] == 0
+    assert 'MAMÁ: antes $207.79 → después $129.99' in editor.outcome.toPlainText()
+    assert 'Yo: antes $0.00 → después $21.22' in editor.outcome.toPlainText()
+    assert repo.database.connection.total_changes == before_changes
+    assert repo.list_orders() == []
+    dialog.show()
+    QApplication.instance().processEvents()
+    editor.outcome.grab().save(str(tmp_path / 'participation-preview.png'))
+    dialog.save()
+    assert not errors
+    parent = next(o for o in repo.list_orders() if repo.list_product_refunds(o['id']))
+    shares = {s['user_id']:s for s in repo.list_collection_items() if s['order_id']==parent['id']}
+    assert shares['mama']['sale_cents'] == result['after']['mama']
+    # Other products in this synthetic PDF belong to owner, so compare the change.
+    assert shares['owner']['sale_cents'] == parent['owner_cents'] + 2122
+    wallet = next(c for c in repo.list_card_summaries() if c['instrument_id']=='wallet')
+    assert wallet['wallet_balance_cents'] == result['wallet_after']
+    changes = repo.database.connection.total_changes
+    dialog.update_totals()
+    assert dialog.refund_preview_data['existing_applied'] == 5658
+    assert dialog.refund_preview_data['wallet_after'] == 5658
+    assert 'ya está registrada' in editor.outcome.toPlainText()
+    dialog.save()
+    assert errors and 'ya está registrada' in errors[-1]
+    assert repo.database.connection.total_changes == changes
+    assert len(repo.list_orders()) == 2
+
+
+def test_surplus_changes_participations_but_does_not_spend_wallet_twice(preview):
+    dialog, repo, _ = preview
+    editor = configure_repurchase(dialog)
+    editor.apply_surplus.setChecked(False)
+    assert dialog.refund_preview_data['applied'] == 0
+    assert dialog.refund_preview_data['after']['mama'] == 20779
+    assert dialog.refund_preview_data['wallet_after'] == 5658
+    editor.apply_surplus.setChecked(True)
+    assert dialog.refund_preview_data['after']['mama'] == 15121
+    assert dialog.refund_preview_data['wallet_after'] == 5658
+    assert repo.list_orders() == []
+
+
+def test_final_resin_animals_case_entire_order_50507_and_no_double_debt(preview):
+    dialog, repo, errors = preview
+    # Fixture subtotal: 602.87, of which 20.00 belongs to owner and 582.87 to Mama.
+    for row in (0, 2, 3):
+        assignment = dialog.table.cellWidget(row, 3)
+        assignment.person.setCurrentIndex(assignment.person.findData('mama'))
+    dialog.table.item(4, 0).setText('150 mini animales de resina')
+    editor = configure_repurchase(dialog)
+    assert 'Reparto final' in editor.allocation_label.text()
+    # Assigning the selector to Yo alone assigns the WHOLE 151.21, not just 21.22.
+    editor.allocation.person.setCurrentIndex(editor.allocation.person.findData('owner'))
+    assert editor.allocation.shares()['owner'] == 15121
+    editor.allocation.divide.setChecked(True)
+    editor.allocation.amounts['owner'].setText('21.22')
+    editor.allocation.amounts['mama'].setText('129.99')
+    changes = repo.database.connection.total_changes
+    dialog.update_totals()
+    preview_result = dialog.refund_preview_data
+    assert preview_result['order_before'] == {'owner':2000, 'mama':58287}
+    assert preview_result['order_after'] == {'owner':4122, 'mama':50507}
+    assert preview_result['wallet_after'] == preview_result['applied'] == 5658
+    text = editor.outcome.toPlainText()
+    assert 'otros productos $375.08 + producto revisado $129.99 = $505.07' in text
+    assert 'a favor de MAMÁ' in text
+    assert 'no es un abono que haya entregado' in text
+    assert repo.database.connection.total_changes == changes and repo.list_orders() == []
+    dialog.save()
+    assert not errors
+    mama = repo.family_statement('mama')
+    assert (mama['assigned_cents'],mama['paid_cents'],mama['remaining_cents']) == (50507,0,50507)
+    assert repo.dashboard_summary()['family_received_cents'] == 0
+    assert repo.dashboard_summary()['discount_benefit_cents'] == 6029
+    assert repo.family_statement('owner')['assigned_cents'] == 4122
+    assert len(repo.list_orders()) == 2  # Original and funded replacement, with no second family debt.
+    linked = next(o for o in repo.list_orders() if not repo.list_product_refunds(o['id']))
+    assert all(s['sale_cents']==0 for s in repo.list_collection_items() if s['order_id']==linked['id'])
+    repo.record_receipt(payment_id='later-mama',receivable_id=mama['rows'][0]['receivable_id'],
+                        amount_cents=10000,received_at='2026-10-11')
+    assert repo.family_statement('mama')['assigned_cents'] == 50507
+    assert repo.family_statement('mama')['remaining_cents'] == 40507
+
+
 def test_repurchase_preview_and_atomic_save(preview):
     dialog, repo, errors = preview
     editor = configure_repurchase(dialog)
@@ -71,7 +166,7 @@ def test_repurchase_preview_and_atomic_save(preview):
 
 
 def test_saved_refund_can_be_extended_without_reimporting(preview):
-    from sgccc.gui.pdf_import import RefundRepurchaseDialog
+    from valenza.gui.pdf_import import RefundRepurchaseDialog
     dialog, repo, errors = preview
     configure_refund(dialog, destination='wallet')
     dialog.save()
@@ -95,7 +190,7 @@ def test_saved_refund_can_be_extended_without_reimporting(preview):
 def test_edit_saved_repurchase_from_pedidos_refreshes_collection_and_dashboard(preview, monkeypatch, tmp_path, width, height):
     from PySide6.QtCore import QTimer, QPoint
     from PySide6.QtGui import QFontDatabase, QFont, QPixmap
-    from sgccc.gui.pdf_import import RefundRepurchaseDialog
+    from valenza.gui.pdf_import import RefundRepurchaseDialog
     font = Path('C:/Windows/Fonts/segoeui.ttf')
     if font.exists():
         font_id = QFontDatabase.addApplicationFont(str(font))
@@ -173,7 +268,7 @@ def test_edit_saved_repurchase_from_pedidos_refreshes_collection_and_dashboard(p
 
 @pytest.mark.parametrize('valid,confirmation', [(False, QMessageBox.StandardButton.Yes), (True, QMessageBox.StandardButton.No)])
 def test_saved_repartition_requires_exact_sum_and_confirmation(preview, monkeypatch, valid, confirmation):
-    from sgccc.gui.pdf_import import RefundRepurchaseDialog
+    from valenza.gui.pdf_import import RefundRepurchaseDialog
     importer, repo, errors = preview
     editor = configure_repurchase(importer)
     editor.allocation.person.setCurrentIndex(editor.allocation.person.findData('owner'))
@@ -198,7 +293,7 @@ def test_saved_repartition_requires_exact_sum_and_confirmation(preview, monkeypa
 def test_saved_repurchase_scroll_keeps_footer_and_values(preview, width, height):
     from PySide6.QtCore import QPoint, QPointF, Qt
     from PySide6.QtGui import QFontDatabase, QFont, QWheelEvent
-    from sgccc.gui.pdf_import import RefundRepurchaseDialog
+    from valenza.gui.pdf_import import RefundRepurchaseDialog
     font = Path('C:/Windows/Fonts/segoeui.ttf')
     if font.exists():
         font_id = QFontDatabase.addApplicationFont(str(font))
@@ -254,7 +349,7 @@ def test_saved_repurchase_scroll_keeps_footer_and_values(preview, width, height)
 def test_pedidos_modal_dynamic_fields_never_grow_dialog(preview, monkeypatch, tmp_path, width, height):
     from PySide6.QtCore import QTimer, QPoint
     from PySide6.QtGui import QFontDatabase, QFont, QPixmap
-    from sgccc.gui.pdf_import import RefundRepurchaseDialog
+    from valenza.gui.pdf_import import RefundRepurchaseDialog
     font = Path('C:/Windows/Fonts/segoeui.ttf')
     if font.exists():
         font_id = QFontDatabase.addApplicationFont(str(font))
@@ -466,7 +561,7 @@ def test_pedidos_import_scroll_contains_all_return_options(preview, monkeypatch,
     from PySide6.QtCore import QTimer, QPoint
     from PySide6.QtGui import QFontDatabase, QFont, QPixmap
     from PySide6.QtWidgets import QFileDialog, QPushButton
-    import sgccc.ocr.order_import as parser
+    import valenza.ocr.order_import as parser
     font = Path('C:/Windows/Fonts/segoeui.ttf')
     if font.exists():
         font_id = QFontDatabase.addApplicationFont(str(font))

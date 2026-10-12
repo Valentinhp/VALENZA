@@ -1,6 +1,10 @@
-# Primera interfaz gráfica de SGCCC
+# Primera interfaz gráfica de Valenza
 
 ## Estado
+
+> Documento histórico de la primera interfaz. Suscripciones, Tarjetas e Inicio
+> se ampliaron después de esta etapa. Consulta [Estado actual](ESTADO_ACTUAL.md)
+> y el [README](../README.md) para las funciones vigentes.
 
 La interfaz PySide6 es una aplicación local de demostración para Windows 10
 x64. La sección **Usuarios** sí es operativa: abre una base SQLCipher,
@@ -53,7 +57,7 @@ En Usuarios se puede:
 La base se guarda en:
 
 ```text
-%LOCALAPPDATA%\SGCCC\sgccc.db
+%LOCALAPPDATA%\Valenza\valenza.db
 ```
 
 Suscripciones e Instituciones continúan deshabilitadas y lo indican
@@ -124,7 +128,7 @@ Desde la raíz del proyecto:
 
 ```powershell
 & ".\.venv\Scripts\python.exe" -m pip install -e ".[gui]"
-& ".\.venv\Scripts\python.exe" -m sgccc.gui.app
+& ".\.venv\Scripts\python.exe" -m valenza.gui.app
 ```
 
 Las pruebas de arranque y navegación usan `QT_QPA_PLATFORM=offscreen` para no

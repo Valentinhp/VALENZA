@@ -5,11 +5,11 @@ PySide6 = pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QListWidget, QMessageBox
 
-from sgccc.finance.models import AllocationMethod, ProductLine
-from sgccc.finance.rules import allocate_line_shares
-from sgccc.gui.app import MainWindow, create_application
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.finance.models import AllocationMethod, ProductLine
+from valenza.finance.rules import allocate_line_shares
+from valenza.gui.app import MainWindow, create_application
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
@@ -224,7 +224,7 @@ def test_order_discount_is_separate_from_card_charge_and_requires_exact_distribu
         instrument_id=str(instrument_id),
         original_cents=10000,
         discount_cents=1000,
-        charged_cents=8500,
+        charged_cents=9000,
         allocations=(
             {"user_id": people["Propietario Ficticio"], "amount_cents": 1000},
             {"user_id": people["Cliente Ficticio"], "amount_cents": 9000},
@@ -232,7 +232,7 @@ def test_order_discount_is_separate_from_card_charge_and_requires_exact_distribu
     )
     order = repository.get_order("order-discount-1")
     assert order["discount_cents"] == 1000
-    assert order["charged_cents"] == 8500
+    assert order["charged_cents"] == 9000
     assert order["total_to_recover_cents"] == 10000
     assert order["owner_cents"] == 1000
     assert 9000 in [item["sale_cents"] for item in order["receivables"]]
@@ -382,7 +382,7 @@ def test_order_screen_uses_direct_editable_rows_and_updates_summary(
     other_row = next(row for row in rows_by_name.values() if row != owner_row)
     window.order_allocations_table.item(owner_row, 1).setText("1500.00")
     window.order_allocations_table.item(other_row, 1).setText("3500.00")
-    assert "Pendiente: $0.00 MXN" in window.order_summary.text()
+    assert "Sin repartir: $0.00 MXN" in window.order_summary.text()
     assert "Descuento calculado" not in window.order_summary.text()
     assert window.order_discount.text() == "$300.00 MXN"
     window._save_order()

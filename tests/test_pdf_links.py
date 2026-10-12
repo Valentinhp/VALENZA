@@ -1,8 +1,8 @@
 from pathlib import Path
 import pytest
 from test_product_refunds import repository,create_discount_comparison_case
-from sgccc.ocr.order_import import read_receipt
-from sgccc.gui.app import write_family_pdf,format_money
+from valenza.ocr.order_import import read_receipt
+from valenza.gui.app import write_family_pdf,format_money
 
 
 def test_native_topup_import_subscription_link_duplicate_and_pdf(repository,tmp_path):
@@ -29,7 +29,7 @@ def test_native_topup_import_subscription_link_duplicate_and_pdf(repository,tmp_
     output=tmp_path/'person.pdf'; write_family_pdf(statement,output)
     with pymupdf.open(output) as doc:
         result=''.join(page.get_text() for page in doc)
-    assert 'Recarga Telcel' in result and 'Suscripción' in result and '$200.00 MXN' in result
+    assert 'Recarga Telcel' in result and 'suscripciones' in result and '$200.00 MXN' in result
     assert statement['remaining_cents']==repository.people_debt_summary()[0]['remaining_cents']
     assert len(statement['forecasts'])==1 and statement['forecasts'][0]['due_date']=='2026-10-10'
 
@@ -46,11 +46,11 @@ def test_products_discount_repurchase_msi_pdf_matches_real_balances(repository,t
     for person in repository.people_debt_summary():
         statement=repository.family_statement(person['id'])
         assert statement['remaining_cents']==person['remaining_cents']
-        path=tmp_path/(person['id']+'.pdf'); write_family_pdf(statement,path)
+        path=tmp_path/(person['id']+'.pdf'); write_family_pdf(statement,path,repository=repository)
         with pymupdf.open(path) as doc:
             text=''.join(page.get_text() for page in doc)
         assert format_money(person['remaining_cents']) in text
         if not person['is_owner']:
-            assert 'Recompra vinculada' in text and '$129.99 MXN' in text and '$56.58 MXN' in text
+            assert '$129.99 MXN' in text and '$56.58 MXN' not in text
     assert repository.order_benefit_summary('order')['expected_result_cents']==1907
     assert repository.database.integrity_report()['ok']

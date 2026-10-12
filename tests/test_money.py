@@ -1,4 +1,4 @@
-from sgccc.ocr.money import find_amounts, parse_amount_cents
+from valenza.ocr.money import find_amounts, parse_amount_cents
 
 
 def test_parse_amount_uses_integer_cents():

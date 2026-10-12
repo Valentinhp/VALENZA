@@ -1,11 +1,62 @@
 from pathlib import Path
+import os
 import pytest
-from sgccc.ocr.order_import import parse_receipt, read_receipt, validate, money
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.ocr.order_import import parse_receipt, read_receipt, validate, money
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 FIXTURE = Path(__file__).parent / 'fixtures_synthetic' / 'mp_products.txt'
 OPENPDF = FIXTURE.with_name('mp_openpdf.txt')
+
+
+def test_original_eight_product_receipt():
+    """Private original stays outside the repository; opt in with its path."""
+    explicit_path = os.environ.get('VALENZA_RECEIPT_TEST_PDF')
+    if not explicit_path:
+        pytest.skip('Private receipt test requires an explicitly supplied VALENZA_RECEIPT_TEST_PDF')
+    source = Path(explicit_path)
+    if not source.is_file():
+        pytest.skip('Set VALENZA_RECEIPT_TEST_PDF to the private original PDF')
+    draft = read_receipt(Path(source))
+    assert (draft['date'], draft['time'], draft['merchant']) == ('2026-09-23', '13:34', 'Varios')
+    assert draft['payment'].startswith('NuBank')
+    assert [p['quantity'] for p in draft['products']] == [1] * 8
+    assert [p['unit'] for p in draft['products']] == [14616, 11283, 6281, 17342, 12908, 19900, 8559, 54900]
+    assert [p['description'] for p in draft['products']] == [
+        'Mochila Impermeable Para Estudiantes De Escuela Primaria, Mochila Para Niñas, Mochila Para Lentejuelas De Mariposa',
+        'Cable Usb 1m Ugreen 60126 Con Entrada Usb Salida Tipo C Negro',
+        'Rollo Listones Para Decoración,cinta Estampación Escuela',
+        'Papel Picado Colores Día De Muertos Decoración 100pz 36x25cm',
+        'Mochila Para Niñas Unicornio Mochila Escolar Impermeable Mochila Infantil Adolescentes Con 6-12 Años',
+        'Funda Cubreasiento Premium Malla Mesh Doble Italika At135x Negro',
+        '2 Piezas Mica Cristal Templado 9d Para Samsung A36/a56',
+        'Tenis Deportivo Para Caminar Next & Co 6181 Rojo Para Mujer',
+    ]
+    assert validate(draft) == draft['paid'] == draft['charged'] == 145789
+    assert draft['discount'] == draft['refund'] == 0
+
+
+def test_openpdf_without_product_summary_still_validates_total():
+    text = OPENPDF.read_text(encoding='utf-8').replace('Productos (5)\n$ 602.87\n', '')
+    assert validate(parse_receipt(text)) == 60287
+    with pytest.raises(ValueError, match='No cuadra'):
+        parse_receipt(text.replace('$ 356.01', '$ 356.02'))
+    with pytest.raises(ValueError):
+        parse_receipt(text.replace('$ 149 x 1 Unidad', '$ 149 x 0 Unidad'))
+
+
+def test_password_protected_and_damaged_pdf(tmp_path):
+    fitz = pytest.importorskip('pymupdf')
+    protected = tmp_path / 'protected.pdf'
+    with fitz.open() as document:
+        document.new_page()
+        document.save(protected, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw='test', owner_pw='owner')
+    with pytest.raises(ValueError, match='contraseña'):
+        read_receipt(protected)
+    damaged = tmp_path / 'damaged.pdf'
+    damaged.write_bytes(b'not a PDF')
+    with pytest.raises(RuntimeError, match='No se pudo leer'):
+        read_receipt(damaged)
 
 
 def test_openpdf_layout_without_brand_and_multiline_products():
@@ -85,7 +136,7 @@ def test_native_pdf_and_no_ocr(tmp_path, monkeypatch):
     with fitz.open() as document:
         document.new_page()
         document.save(blank)
-    monkeypatch.setattr('sgccc.ocr.order_import.shutil.which', lambda _: None)
+    monkeypatch.setattr('valenza.ocr.order_import.shutil.which', lambda _: None)
     with pytest.raises(ValueError, match='Se necesita OCR'):
         read_receipt(blank)
 

@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from sgccc.ocr.order_import import parse_receipt, read_receipt, validate
-from sgccc.persistence.database import LocalDatabase
-from sgccc.persistence.repository import FinanceRepository
+from valenza.ocr.order_import import parse_receipt, read_receipt, validate
+from valenza.persistence.database import LocalDatabase
+from valenza.persistence.repository import FinanceRepository
 
 
 FIXTURE = Path(__file__).parent / 'fixtures_synthetic' / 'mp_topup.txt'
@@ -49,8 +49,8 @@ def test_topup_does_not_inherit_product_adjustments(key, value):
 def test_topup_preview_confirmation_duplicate_and_single_bank_charge(person, monkeypatch, tmp_path):
     from PySide6.QtWidgets import QMessageBox, QLabel
     from PySide6.QtGui import QFont, QFontDatabase
-    from sgccc.gui.app import MainWindow, create_application
-    from sgccc.gui.pdf_import import ImportPreview
+    from valenza.gui.app import MainWindow, create_application
+    from valenza.gui.pdf_import import ImportPreview
     app = create_application([])
     font_id = QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
     if font_id >= 0:

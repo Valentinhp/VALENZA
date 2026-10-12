@@ -2,7 +2,7 @@ import pytest
 from test_product_refunds import repository
 from test_personal_balance import reference_case
 from test_subscriptions import subscription
-from sgccc.gui.app import person_statement_html,write_family_pdf,MainWindow,create_application
+from valenza.gui.app import person_statement_html,write_family_pdf,MainWindow,create_application
 
 
 def test_all_people_owner_and_same_real_balances(repository):
@@ -31,15 +31,15 @@ def test_person_pdf_matches_dashboard_and_receipts_are_independent(repository,tm
         statement=repository.family_statement(person['id'])
         assert statement['remaining_cents']==person['remaining_cents']
         assert statement['paid_cents']==person['paid_cents']
-        path=tmp_path/(person['id']+'.pdf'); write_family_pdf(statement,path)
+        path=tmp_path/(person['id']+'.pdf'); write_family_pdf(statement,path,repository=repository)
         with pymupdf.open(path) as document:
             text=''.join(p.get_text() for p in document)
-        from sgccc.gui.app import format_money
+        from valenza.gui.app import format_money
         assert format_money(person['remaining_cents']) in text
         assert format_money(person['paid_cents']) in text
-        assert 'Pendiente' in text
+        assert 'Te falta pagar' in text
         if person['id']=='mama':
-            assert 'Recompra vinculada' in text and '$56.58 MXN' in text
+            assert 'Cambio por devolución' not in text and '$56.58 MXN' not in text
     assert repository.dashboard_summary()['institutional_balance_cents']==before-1000
 
 
@@ -55,7 +55,7 @@ def test_dashboard_selection_owner_pdf_and_small_render(repository,tmp_path,monk
     assert window.dashboard_people.rowCount()==2
     assert window._table_id(window.dashboard_people,5)=='owner'
     path=tmp_path/'owner.pdf'
-    monkeypatch.setattr('sgccc.gui.app.QFileDialog.getSaveFileName',lambda *args,**kwargs:(str(path),'PDF'))
+    monkeypatch.setattr('valenza.gui.app.QFileDialog.getSaveFileName',lambda *args,**kwargs:(str(path),'PDF'))
     window.dashboard_person_pdf.click()
     assert path.exists()
     row=next(r for r in range(window.dashboard_people.rowCount()) if window.dashboard_people.item(r,5).text()=='mama')
