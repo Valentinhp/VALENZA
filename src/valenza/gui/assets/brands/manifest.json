@@ -1,0 +1,70 @@
+{
+  "amazonprime": {
+    "title": "Amazon Prime",
+    "hex": "00A8E1",
+    "source": "https://www.amazon.com/b?node=17277626011",
+    "sha256": "493cb06b25292b562a806caeec091f63712fb349df4a54b3ee58a408e7e83cbd",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/amazonprime.svg"
+  },
+  "applemusic": {
+    "title": "Apple Music",
+    "hex": "FA243C",
+    "source": "https://www.apple.com/itunes/marketing-on-music/identity-guidelines.html#apple-music-icon",
+    "sha256": "365264bcf032a1acb6f18554cf7d34b1b2a75f7e571848629173bbfd0e1cadbb",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/applemusic.svg"
+  },
+  "hsbc": {
+    "title": "HSBC",
+    "hex": "DB0011",
+    "source": "https://www.hsbc.com",
+    "guidelines": "https://www.hsbc.com/terms-and-conditions",
+    "sha256": "d0c04fb9e0cba69e3ad9ac896241200aa8beb8a16f3271715860c27c558006bf",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/hsbc.svg"
+  },
+  "mercadopago": {
+    "title": "Mercado Pago",
+    "hex": "00B1EA",
+    "source": "https://www.mercadopago.com",
+    "sha256": "9295b6c415bb0ce4512a5cd9cbdd273590360f440555e1790a61d5f67bdf351f",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/mercadopago.svg"
+  },
+  "netflix": {
+    "title": "Netflix",
+    "hex": "E50914",
+    "source": "https://brand.netflix.com/en/assets/brand-symbol",
+    "guidelines": "https://brand.netflix.com/en/assets/brand-symbol",
+    "sha256": "953016177fafc83dc8a51868a584600b39dfeff652a07be028a61283915df547",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/netflix.svg"
+  },
+  "nubank": {
+    "title": "Nubank",
+    "hex": "820AD1",
+    "source": "https://nubank.com.br/en/press/",
+    "sha256": "f763a0e063826127d1c72a476edc8b4faa6b8f1b1047042a23a567490181fd37",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/nubank.svg"
+  },
+  "primevideo": {
+    "title": "Prime Video",
+    "hex": "1F2E3E",
+    "source": "https://videodirect.amazon.com/home/help?topicId=GT7W7GJBTDJW6Z8W#G8T2JFQZXPMHJLRZ",
+    "guidelines": "https://videodirect.amazon.com/home/help?topicId=GT7W7GJBTDJW6Z8W#G8T2JFQZXPMHJLRZ",
+    "sha256": "7709e02c4da8574eba7c99222ea95a20320123b9e112811dbe7e1578386d2d8e",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/primevideo.svg"
+  },
+  "spotify": {
+    "title": "Spotify",
+    "hex": "1ED760",
+    "source": "https://developer.spotify.com/documentation/general/design-and-branding/#using-our-logo",
+    "guidelines": "https://developer.spotify.com/documentation/general/design-and-branding/#using-our-logo",
+    "sha256": "b9ec9bec7769c35643981586d6ea0d675aaf3871b32f8a291bcac7a87fff0bc1",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/spotify.svg"
+  },
+  "youtube": {
+    "title": "YouTube",
+    "hex": "FF0000",
+    "source": "https://www.youtube.com/howyoutubeworks/resources/brand-resources/#logos-icons-and-colors",
+    "guidelines": "https://www.youtube.com/howyoutubeworks/resources/brand-resources/#logos-icons-and-colors",
+    "sha256": "5038808acbbc4e6edda16cbeb1cc6dec80e4e4ee4e227e039c41229fa222aa8c",
+    "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/youtube.svg"
+  }
+}

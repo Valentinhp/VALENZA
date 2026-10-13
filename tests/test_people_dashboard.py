@@ -1,5 +1,5 @@
 import pytest
-from test_product_refunds import repository
+from test_home_people_breakdown import encrypted_repository as repository
 from test_personal_balance import reference_case
 from test_subscriptions import subscription
 from valenza.gui.app import person_statement_html,write_family_pdf,MainWindow,create_application
@@ -60,7 +60,10 @@ def test_dashboard_selection_owner_pdf_and_small_render(repository,tmp_path,monk
     assert path.exists()
     row=next(r for r in range(window.dashboard_people.rowCount()) if window.dashboard_people.item(r,5).text()=='mama')
     window.dashboard_people.selectRow(row)
-    assert '$505.07 MXN' in window.dashboard_person_details.toPlainText()
+    window.dashboard_person_toggle.click()
+    section = window.dashboard_person_details.sections['mama']
+    section.toggle.click()
+    assert any(r.values['sale_cents'].text() == '$505.07 MXN' for r in section.pending_rows)
     scroll=window.pages.widget(0).findChild(QScrollArea)
     scroll.ensureWidgetVisible(window.dashboard_people)
     app.processEvents(); window.grab().save(str(tmp_path/'people-small.png'))

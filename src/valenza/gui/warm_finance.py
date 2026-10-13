@@ -1,4 +1,4 @@
-"""Presentation-only painting for the Inicio dashboard; no financial queries."""
+"""Warm Finance surfaces, summaries and charts; no financial queries."""
 from PySide6.QtCore import Qt, QRectF, QSize
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QIcon, QPainterPath
 from PySide6.QtWidgets import QWidget, QStyledItemDelegate, QFrame, QVBoxLayout, QLabel
@@ -91,17 +91,7 @@ def warm_section(title):
 def apply_warm_surface(widget, name):
     widget.setObjectName(name)
     style = HOME_STYLE.replace('#valenzaHome', '#' + name)
-    style += f'''
-    QWidget#{name}Content {{ background:#f8f4ee; }}
-    QWidget#{name} QLineEdit, QWidget#{name} QComboBox, QWidget#{name} QSpinBox {{ background:#fffcf8; border:1px solid #ddcfc0; border-radius:6px; padding:4px 6px; min-height:22px; color:#292724; }}
-    QWidget#{name} QLineEdit:focus, QWidget#{name} QComboBox:focus, QWidget#{name} QSpinBox:focus {{ border-color:#af7351; }}
-    QWidget#{name} QPushButton#primaryAction {{ background:#bd704b; color:#fffaf4; border-color:#ae6543; }}
-    QWidget#{name} QPushButton#primaryAction:hover {{ background:#a65e3e; }}
-    QWidget#{name} QPushButton#primaryAction:disabled {{ background:#ded3c7; color:#8a8177; border-color:#ded3c7; }}
-    QWidget#{name} QPushButton#dangerAction {{ color:#a75340; background:#f5e8e1; border-color:#e1c3b7; }}
-    QWidget#{name} QLabel#sectionTitle {{ font-weight:600; color:#80543c; }}
-    QWidget#{name} QCheckBox {{ color:#565d55; spacing:7px; }}
-    '''
+    style += f'QWidget#{name}Content {{ background:#f8f4ee; }}'
     widget.setStyleSheet(style)
 
 
@@ -286,18 +276,8 @@ QWidget#valenzaHome QLabel#summaryAmount { font-size: 22px; font-weight: 600; }
 QWidget#valenzaHome QFrame#monthCommitments { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #d68b5b,stop:1 #a85032); border: none; border-radius: 14px; padding: 10px; }
 QWidget#valenzaHome QFrame#monthCommitments QLabel { color: #fffaf4; }
 QWidget#valenzaHome QFrame#monthCommitments QLabel#summaryAmount { font-size: 30px; }
-QWidget#valenzaHome QPushButton { background: #f3e6d8; color: #804728; border: 1px solid #ead8c8; border-radius: 7px; padding: 4px 12px; min-height: 24px; }
-QWidget#valenzaHome QPushButton:hover { background: #eed8c5; }
-QWidget#valenzaHome QPushButton:focus { border: 2px solid #9b5d3c; padding: 3px 11px; }
-QWidget#valenzaHome QPushButton:checked { background: #e8c4aa; border-color: #c57c54; }
-QWidget#valenzaHome QPushButton:disabled { background: #eeeae4; color: #a4a09b; }
-QWidget#valenzaHome QTableWidget, QWidget#valenzaHome QListWidget, QWidget#valenzaHome QTextEdit { background: #fffcf8; alternate-background-color: #f5efe7; border: 1px solid #e5ddd2; border-radius: 8px; gridline-color: #eee7df; selection-background-color: #f0d8c6; selection-color: #3e3934; }
-QWidget#valenzaHome QHeaderView::section { background: #efe7dc; color: #5e605b; padding: 6px; border: none; font-weight: 600; }
 QWidget#valenzaHome QLabel#secondaryText { color: #706f66; font-size: 12px; }
 QWidget#valenzaHome QLabel#sectionTitle { color: #292724; font-weight: 600; }
 QWidget#valenzaHome QFrame#monthCommitments QLabel#secondaryText { color: #fff3e6; }
 QWidget#valenzaHome QListWidget#recentMovements::item:selected { background: #f4e3d3; }
-QWidget#valenzaHome QScrollBar:vertical { background: #f4eee6; width: 9px; }
-QWidget#valenzaHome QScrollBar::handle:vertical { background: #d6c3b0; border-radius: 4px; min-height: 24px; }
-QWidget#valenzaHome QScrollBar::add-line:vertical, QWidget#valenzaHome QScrollBar::sub-line:vertical { height: 0; }
 """

@@ -72,6 +72,12 @@ No existe conciliación bancaria automática ni OCR en la nube.
 
 ## Pruebas
 
+La interfaz comparte el sistema Warm Finance para controles, popups y diálogos.
+Los servicios e instituciones reconocidos usan recursos locales; el reconocimiento
+no modifica nombres ni datos financieros. Consulta el
+[alcance del branding y la revisión visual](docs/BRAND_EXPERIENCE.md), incluidas las
+marcas que emplean distintivos de texto en lugar de logotipos oficiales.
+
 Los tests usan datos sintéticos, fixtures anonimizados y bases temporales.
 Los documentos personales originales no forman parte del proyecto.
 

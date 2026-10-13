@@ -15,7 +15,8 @@ def test_home_structure_preserves_amounts_actions_and_database(size, tmp_path, m
     font_id = QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
     if font_id >= 0:
         app.setFont(QFont(QFontDatabase.applicationFontFamilies(font_id)[0], 10))
-    database = LocalDatabase.open(':memory:', 'synthetic', allow_synthetic_in_memory=True)
+    database = LocalDatabase.open(tmp_path / 'synthetic-home.db', 'synthetic-home-test')
+    assert database.encrypted
     database.migrate()
     repo = FinanceRepository(database)
     repo.add_person('owner', 'Yo', is_owner=True)
@@ -60,7 +61,7 @@ def test_home_structure_preserves_amounts_actions_and_database(size, tmp_path, m
     window.dashboard_result_toggle.click()
     assert window.dashboard_result_details.isVisible() and window.dashboard_result_details.toPlainText()
     window.dashboard_person_toggle.click()
-    assert window.dashboard_person_details.isVisible() and window.dashboard_person_details.toPlainText()
+    assert window.dashboard_person_details.isVisible() and window.dashboard_person_details.sections
     exported = []
     monkeypatch.setattr(window, '_export_family_pdf', exported.append)
     window.dashboard_person_pdf.click()

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStyledItemDelegate,
     QStackedWidget,
     QTableWidget,
@@ -39,11 +40,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt, Signal, QSignalBlocker, QRegularExpression, QEvent
-from PySide6.QtGui import QRegularExpressionValidator, QPixmap, QIcon
+from PySide6.QtCore import Qt, Signal, QSignalBlocker, QRegularExpression, QEvent, QSize
+from PySide6.QtGui import QRegularExpressionValidator, QPixmap, QIcon, QColor, QFont, QFontMetrics
 from valenza.gui.warm_finance import (FinanceChart, HOME_STYLE, line_icon, MovementDelegate,
                                     apply_warm_surface, warm_section, FinancialSummary, financial_text_html)
 from valenza.gui.unlock import UnlockDialog
+from valenza.gui.design_system import install_design_system
+from valenza.gui.branding import brand_icon, PaymentIdentity
+from valenza.gui.home_people_breakdown import HomePeopleBreakdown
 
 from valenza.persistence.database import DATABASE_ERRORS, DatabaseSecurityError, LocalDatabase, SCHEMA_VERSION
 from valenza.persistence.repository import FinanceRepository
@@ -248,7 +252,7 @@ class MainWindow(QMainWindow):
                 table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
                 table.horizontalHeader().setMinimumSectionSize(75)
             self.cards_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-            self.cards_table.setColumnWidth(1, 120)
+            self.cards_table.setColumnWidth(1, 150)
             self.cards_table.horizontalHeaderItem(4).setText('Deuda total (incluye futuras)')
             for table, columns in ((self.collection_items, (3, 4, 5)), (self.cards_table, (2, 3, 4))):
                 delegate = CompactMoneyDelegate(table)
@@ -281,8 +285,11 @@ class MainWindow(QMainWindow):
             table = getattr(self, name, None)
             if table is None:
                 continue
+            header_font = QFont(table.horizontalHeader().font())
+            header_font.setBold(True)
+            header_metrics = QFontMetrics(header_font)
             for column in columns:
-                width = max(75, table.horizontalHeader().fontMetrics().horizontalAdvance(table.horizontalHeaderItem(column).text()) + 14)
+                width = max(75, header_metrics.horizontalAdvance(table.horizontalHeaderItem(column).text()) + 22)
                 for row in range(table.rowCount()):
                     item = table.item(row, column)
                     if item:
@@ -358,48 +365,105 @@ class MainWindow(QMainWindow):
 
     def _make_subscriptions_page(self):
         page = QWidget()
+        apply_warm_surface(page, 'warmSubscriptions')
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel('Suscripciones mensuales'))
+        title = QLabel('Suscripciones'); title.setObjectName('pageTitle')
+        header = QHBoxLayout(); header.addWidget(title); header.addStretch()
+        create = QPushButton('Nueva suscripción'); create.setObjectName('primaryAction')
+        create.clicked.connect(lambda: self._edit_subscription())
+        header.addWidget(create); layout.addLayout(header)
         notice = QLabel('Los próximos cobros son previstos. Registrar un cargo real crea un solo Pedido; vincular uno existente no lo repite.')
         notice.setWordWrap(True)
         layout.addWidget(notice)
+        self.subscription_summary = QLabel(); self.subscription_summary.setWordWrap(True)
+        summary, summary_body = warm_section('Previsión mensual · sin deuda bancaria')
+        summary_body.addWidget(self.subscription_summary); layout.addWidget(summary)
+        self.subscription_empty_card, empty_body = warm_section('Tu primer servicio, en orden')
+        self.subscription_empty = QLabel('Organiza el calendario y reparto de tus servicios. Una previsión no registra cargos reales.')
+        self.subscription_empty.setWordWrap(True); empty_body.addWidget(self.subscription_empty)
+        first = QPushButton('Crear primera suscripción'); first.setObjectName('primaryAction')
+        first.clicked.connect(lambda: self._edit_subscription())
+        empty_body.addWidget(first, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.subscription_empty_card)
+        detail, detail_body = warm_section('Suscripción seleccionada')
         actions = QGridLayout()
-        for index, (text, callback) in enumerate((('Nueva suscripción',lambda:self._edit_subscription()),
-                ('Editar',lambda:self._edit_subscription(self._table_id(self.subscription_table,5))),
+        self.subscription_actions = []
+        for index, (text, callback) in enumerate((('Editar',lambda:self._edit_subscription(self._table_id(self.subscription_table,5))),
                 ('Pausar / reactivar',lambda:self._subscription_status(False)),
                 ('Cancelar suscripción',lambda:self._subscription_status(True)),
                 ('Registrar o vincular cargo real',self._subscription_charge_dialog))):
             button = QPushButton(text)
+            if index == 2: button.setObjectName('dangerAction')
             button.clicked.connect(callback)
-            actions.addWidget(button,index//2,index%2)
-        layout.addLayout(actions)
+            actions.addWidget(button,index//2,index%2, alignment=Qt.AlignmentFlag.AlignLeft)
+            self.subscription_actions.append(button)
         self.subscription_table = QTableWidget(0,6)
-        self.subscription_table.setHorizontalHeaderLabels(['Servicio / cuenta','Próximo cobro','Importe','Estado','Familia pendiente','ID'])
+        self.subscription_table.setHorizontalHeaderLabels(['Servicio / cuenta','Próximo previsto','Mensual MXN','Estado','Reparto familiar MXN','ID'])
         self.subscription_table.setColumnHidden(5,True)
         self.subscription_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.subscription_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.subscription_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.subscription_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.subscription_table,1)
+        self.subscription_table.setMaximumHeight(260)
+        self.subscription_table.setAlternatingRowColors(True)
+        self.subscription_table.setIconSize(QSize(24, 24))
+        self.subscription_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.subscription_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.subscription_table)
         self.subscription_detail = QLabel()
         self.subscription_detail.setWordWrap(True)
-        layout.addWidget(self.subscription_detail)
+        self.subscription_detail.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.subscription_brand = QLabel()
+        self.subscription_brand.setFixedSize(32, 32)
+        self.subscription_brand.setAccessibleName('Identidad del servicio')
+        detail_row = QHBoxLayout()
+        detail_row.setAlignment(Qt.AlignmentFlag.AlignTop)
+        detail_row.addWidget(self.subscription_brand, 0, Qt.AlignmentFlag.AlignTop)
+        detail_row.addWidget(self.subscription_detail, 1)
+        detail_body.addLayout(detail_row)
+        self.subscription_payment_identity = PaymentIdentity()
+        detail_body.addWidget(self.subscription_payment_identity)
+        actions.setColumnStretch(2, 1)
+        detail_body.addLayout(actions); layout.addWidget(detail); layout.addStretch()
         self.subscription_table.itemSelectionChanged.connect(self._subscription_selection)
         self._refresh_subscriptions()
-        return page
+        return self._admin_scroll(page)
+
+    @staticmethod
+    def _admin_scroll(content):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(content)
+        return scroll
 
     def _refresh_subscriptions(self):
         selected = self._table_id(self.subscription_table,5)
+        subscriptions = self.repository.list_subscriptions()
+        active = [s for s in subscriptions if s['status'] == 'ACTIVE']
+        family = sum(a['amount_cents'] + a['surcharge_cents'] for s in active for a in s['allocations'] if not a['is_owner'])
+        next_due = min((s['next_due'] for s in active), default='Sin cargos previstos')
+        self.subscription_summary.setText(f"Gasto previsto: {format_money(sum(s['amount_cents'] for s in active))} · Activas: {len(active)}\nPróximo cargo previsto: {next_due} · Familia prevista (incluye recargos): {format_money(family)}")
+        self.subscription_empty.setVisible(not subscriptions)
+        self.subscription_empty_card.setVisible(not subscriptions)
+        self.subscription_table.setVisible(bool(subscriptions))
+        self.subscription_table.setFixedHeight(min(260, 48 + len(subscriptions) * 32))
         with QSignalBlocker(self.subscription_table):
             self.subscription_table.setRowCount(0)
-            for subscription in self.repository.list_subscriptions():
+            for subscription in subscriptions:
                 row = self.subscription_table.rowCount()
                 self.subscription_table.insertRow(row)
                 values = [subscription['name']+' · '+subscription['alias'],subscription['next_due'],
                           format_money(subscription['amount_cents']),{'ACTIVE':'Activa','PAUSED':'Pausada','CANCELLED':'Cancelada'}[subscription['status']],
-                          format_money(subscription['family_pending_cents']),subscription['id']]
+                          format_money(sum(a['amount_cents']+a['surcharge_cents'] for a in subscription['allocations'] if not a['is_owner'])),subscription['id']]
                 for column,value in enumerate(values):
                     item = QTableWidgetItem(str(value)); item.setToolTip(str(value))
+                    if column == 3:
+                        item.setForeground(QColor({'ACTIVE':'#48705a','PAUSED':'#9b6839','CANCELLED':'#9d5043'}[subscription['status']]))
+                    if column == 0:
+                        item.setIcon(brand_icon(subscription['name']))
+                    if column in (2, 4):
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     self.subscription_table.setItem(row,column,item)
                 if subscription['id'] == selected:
                     self.subscription_table.selectRow(row)
@@ -408,7 +472,21 @@ class MainWindow(QMainWindow):
     def _subscription_selection(self):
         identity = self._table_id(self.subscription_table,5)
         subscription = next((s for s in self.repository.list_subscriptions() if s['id']==identity),None)
-        self.subscription_detail.setText(' · '.join(f"{a['name']}: {format_money(a['amount_cents'])}" + (f" + recargo {format_money(a['surcharge_cents'])}" if a['surcharge_cents'] else '') for a in subscription['allocations']) if subscription else 'Selecciona una suscripción para ver su reparto. Los cambios afectan ciclos futuros.')
+        for index, button in enumerate(self.subscription_actions):
+            button.setEnabled(bool(subscription and subscription['status'] != 'CANCELLED' and (index != 3 or subscription['status'] == 'ACTIVE')))
+        self.subscription_actions[1].setText('Reactivar' if subscription and subscription['status']=='PAUSED' else 'Pausar')
+        self.subscription_payment_identity.set_instrument(self._brand_instrument(subscription["instrument_id"]) if subscription else None)
+        self.subscription_brand.setVisible(bool(subscription))
+        if subscription:
+            self.subscription_brand.setPixmap(brand_icon(subscription["name"]).pixmap(32, 32))
+            self.subscription_brand.setToolTip(subscription["name"])
+        if not subscription:
+            self.subscription_detail.setText('Selecciona un servicio para consultar su calendario y responsables. Los cambios afectan ciclos futuros.')
+            return
+        state = {'ACTIVE':'Activa','PAUSED':'Pausada','CANCELLED':'Cancelada'}[subscription['status']]
+        shares = '\n'.join(f"{a['name']}: {format_money(a['amount_cents'])}" + (f" + recargo {format_money(a['surcharge_cents'])}" if a['surcharge_cents'] else '') for a in subscription['allocations'])
+        self.subscription_detail.setText(f"{subscription['name']} · {state} · {subscription['alias']}\nMensual: {format_money(subscription['amount_cents'])} · Próximo previsto: {subscription['next_due']} · Día del ciclo: {subscription['billing_day']}\n{shares}\nFamilia pendiente de cargos ya registrados: {format_money(subscription['family_pending_cents'])}")
+        self.subscription_detail.setMinimumHeight(self.subscription_detail.fontMetrics().lineSpacing() * (len(self.subscription_detail.text().splitlines()) + 1))
 
     def _edit_subscription(self, identity=None):
         existing = next((s for s in self.repository.list_subscriptions() if s['id']==identity),None)
@@ -417,38 +495,64 @@ class MainWindow(QMainWindow):
         if existing and existing['status']=='CANCELLED':
             self._show_error('Una suscripción cancelada conserva su historial y no se edita.'); return
         dialog,body,save = self._financial_dialog('Editar suscripción' if existing else 'Nueva suscripción mensual')
+        apply_warm_surface(dialog, 'warmSubscriptionDialog')
+        dialog.resize(660, 590)
+        body.parentWidget().setObjectName('warmSubscriptionDialogContent')
+        body.parentWidget().setStyleSheet('#warmSubscriptionDialogContent { background: #f8f4ee; }')
+        heading = QLabel(dialog.windowTitle()); heading.setObjectName('sectionTitle'); heading.setWordWrap(True); body.addWidget(heading)
+        service, service_body = warm_section('Servicio y calendario'); body.addWidget(service)
+        save.setObjectName('primaryAction')
         form = QFormLayout()
         name = QLineEdit(existing['name'] if existing else '')
+        service_identity = QLabel()
+        service_identity.setFixedSize(32, 32)
+        service_identity.setAccessibleName('Identidad del servicio')
+        def update_service_identity(text):
+            service_identity.setPixmap(brand_icon(text).pixmap(32, 32))
+            service_identity.setToolTip(text or 'Suscripción')
+        name.textChanged.connect(update_service_identity)
+        update_service_identity(name.text())
+        service_name_row = QWidget()
+        service_name_layout = QHBoxLayout(service_name_row)
+        service_name_layout.setContentsMargins(0, 0, 0, 0)
+        service_name_layout.addWidget(service_identity)
+        service_name_layout.addWidget(name, 1)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         amount = self._money_input(existing['amount_cents'] if existing else 0)
         due = QLineEdit(existing['next_due'] if existing else date.today().isoformat())
         instrument = QComboBox()
         for card in self.repository.list_all_instruments():
             if card['active'] or existing and card['id']==existing['instrument_id']:
-                instrument.addItem(f"{card['alias']} · {card['institution_name']}",card['id'])
+                instrument.addItem(brand_icon(card['institution_name'], 'institution'), f"{card['alias']} · {card['institution_name']}", card['id'])
         if existing: instrument.setCurrentIndex(instrument.findData(existing['instrument_id']))
-        for label,field in (('Servicio',name),('Importe mensual MXN',amount),('Próximo cobro AAAA-MM-DD',due),('Cuenta / tarjeta',instrument)):
+        for label,field in (('Servicio',service_name_row),('Importe mensual MXN',amount),('Próximo cobro AAAA-MM-DD',due),('Cuenta / tarjeta',instrument)):
             form.addRow(label,field)
-        body.addLayout(form)
+        service_body.addLayout(form)
+        reparto, reparto_body = warm_section('Reparto mensual · importes en MXN'); body.addWidget(reparto)
+        explanation = QLabel('Las participaciones deben sumar el importe mensual. Los recargos familiares no aumentan el cargo bancario.')
+        explanation.setWordWrap(True); reparto_body.addWidget(explanation)
         fees = QCheckBox('Recargo familiar por persona (opcional)')
         fees.setChecked(bool(existing and any(a['surcharge_cents'] for a in existing['allocations'])))
-        body.addWidget(fees)
+        reparto_body.addWidget(fees)
         shares = QFormLayout()
         shares.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         fields = []
         previous = {a['user_id']:a for a in existing['allocations']} if existing else {}
         for person in self.repository.list_people():
-            if not person['active']: continue
+            if not person['active'] and person['id'] not in previous: continue
             allocation = previous.get(person['id'],{})
             value = self._money_input(allocation.get('amount_cents',0))
             fee = self._money_input(allocation.get('surcharge_cents',0))
             fee.setEnabled(fees.isChecked() and not person['is_owner'])
             fee.setToolTip('Recargo familiar; no aumenta el cargo bancario.')
+            if not person['active']:
+                value.setReadOnly(True); fee.setReadOnly(True)
+                value.setToolTip('Responsable inactivo conservado. Reactiva la persona en Usuarios antes de guardar cambios, según las reglas existentes.')
             row = QHBoxLayout(); row.addWidget(value); row.addWidget(QLabel('Recargo')); row.addWidget(fee)
-            shares.addRow(person['name'],row)
+            shares.addRow(person['name'] + (' · inactiva' if not person['active'] else ''),row)
             fields.append((person,value,fee))
         fees.toggled.connect(lambda checked:[fee.setEnabled(checked and not p['is_owner']) for p,value,fee in fields])
-        body.addLayout(shares)
+        reparto_body.addLayout(shares)
         error = QLabel(); error.setWordWrap(True); body.addWidget(error)
         def persist():
             save.setEnabled(False)
@@ -480,6 +584,10 @@ class MainWindow(QMainWindow):
         existing = next((s for s in self.repository.list_subscriptions() if s['id']==identity),None)
         if not existing: return
         dialog,body,save = self._financial_dialog('Cargo real de suscripción')
+        apply_warm_surface(dialog, 'warmSubscriptionCharge')
+        body.parentWidget().setObjectName('warmSubscriptionChargeContent')
+        body.parentWidget().setStyleSheet('#warmSubscriptionChargeContent { background: #f8f4ee; }')
+        save.setObjectName('primaryAction'); save.setText('Registrar cargo real')
         body.addWidget(QLabel(f"{existing['name']} · ciclo {existing['next_due']} · {format_money(existing['amount_cents'])}"))
         choices = QComboBox(); choices.addItem('Registrar un nuevo cargo REAL',None)
         for order in self.repository.list_orders():
@@ -489,9 +597,11 @@ class MainWindow(QMainWindow):
         actual = QLineEdit(date.today().isoformat())
         body.addWidget(QLabel('Fecha del cargo real AAAA-MM-DD (solo para nuevo cargo)')); body.addWidget(actual)
         choices.currentIndexChanged.connect(lambda:actual.setEnabled(choices.currentData() is None))
+        choices.currentIndexChanged.connect(lambda: save.setText('Registrar cargo real' if choices.currentData() is None else 'Vincular pedido existente'))
         notice = QLabel('Guarda únicamente cuando el cargo exista. Los pedidos importados se vinculan seleccionándolos; no los registres de nuevo. El importe, cuenta y reparto deben coincidir.')
         notice.setWordWrap(True); body.addWidget(notice)
         error = QLabel(); error.setWordWrap(True); body.addWidget(error)
+        body.addStretch()
         def persist():
             save.setEnabled(False)
             try:
@@ -822,7 +932,7 @@ class MainWindow(QMainWindow):
     def _load_card_catalogs(self) -> None:
         self.card_institution.clear()
         for item in self.repository.list_institutions():
-            self.card_institution.addItem(str(item["name"]), item["id"])
+            self.card_institution.addItem(brand_icon(str(item["name"]), "institution"), str(item["name"]), item["id"])
         self._refresh_card_instruments()
 
     def _refresh_card_instruments(self) -> None:
@@ -831,7 +941,7 @@ class MainWindow(QMainWindow):
         self.card_instrument.clear()
         institution_id = self.card_institution.currentData()
         for item in self.repository.list_instruments(institution_id) if institution_id else []:
-            self.card_instrument.addItem(str(item["alias"]), item["id"])
+            self.card_instrument.addItem(brand_icon(self.card_institution.currentText(), "institution"), str(item["alias"]), item["id"])
 
     def _record_bank_query(self):
         instrument_id = self._selected_card_id()
@@ -874,7 +984,11 @@ class MainWindow(QMainWindow):
                 format_money(comparison['difference_cents']) if comparison and comparison['difference_cents'] is not None else 'Sin consultar' if comparison else 'No aplica',
             )
             for column, value in enumerate(values):
-                self.cards_table.setItem(row, column, QTableWidgetItem(str(value)))
+                cell = QTableWidgetItem(str(value))
+                if column == 1:
+                    cell.setIcon(brand_icon(card['institution_name'], 'institution'))
+                    cell.setToolTip(str(value))
+                self.cards_table.setItem(row, column, cell)
             if card["instrument_id"] == selected_id:
                 self.cards_table.selectRow(row)
         blocker.unblock()
@@ -1185,6 +1299,7 @@ class MainWindow(QMainWindow):
         self.admin_institution.clear()
         for institution in self.repository.list_all_institutions():
             self.admin_institution.addItem(
+                brand_icon(institution["name"], "institution"),
                 f"{institution['name']} "
                 f"({'activa' if institution['active'] else 'inactiva'})",
                 institution["id"],
@@ -1370,7 +1485,8 @@ class MainWindow(QMainWindow):
         self.collection_filter.addItem("Cobros familiares", "FAMILY")
         self.collection_filter.addItem("Históricos por revisar", "UNKNOWN")
         self.collection_filter.currentIndexChanged.connect(self._filter_collections)
-        self.family_pdf_button = QPushButton('PDF de la persona seleccionada')
+        self.family_pdf_button = QPushButton('PDF de la persona')
+        self.family_pdf_button.setToolTip('Exportar el estado de cuenta de la persona seleccionada')
         self.family_pdf_button.clicked.connect(self._export_family_pdf)
         filters = QHBoxLayout()
         filters.addWidget(QLabel('Participación'))
@@ -1430,6 +1546,8 @@ class MainWindow(QMainWindow):
         self.collection_selected_details.setWordWrap(True)
         self.collection_selected_details.setTextFormat(Qt.TextFormat.RichText)
         payment_body.addWidget(self.collection_selected_details)
+        self.collection_payment_identity = PaymentIdentity()
+        payment_body.addWidget(self.collection_payment_identity)
         payment_row = QGridLayout()
         self.collection_current_balance = QLabel("Selecciona una cuenta para ver el saldo.")
         self.collection_current_balance.setObjectName("collectionBalance")
@@ -1638,6 +1756,7 @@ class MainWindow(QMainWindow):
             return
         with QSignalBlocker(self.collection_items):
             self.collection_items.clearSelection()
+        self.collection_payment_identity.set_instrument(None)
         self.collection_selected_details.setText(
             f"<b>{escape(str(item['user_name']))}</b> · {escape(str(item['source_name'] or 'Sin comercio identificado'))}<br>"
             f"{escape(self._participation_label(item['payment_kind']))} · Abono: <b>{escape(format_money(int(item['amount_cents'])))}</b>"
@@ -1826,10 +1945,17 @@ class MainWindow(QMainWindow):
         extras.addWidget(self.collection_extras_explanation, 6 if narrow else 3, 0, 1, 2 if narrow else 4)
 
     def _show_collection_details(self):
+        self.collection_payment_identity.set_instrument(None)
         row = self._selected_row(self.collection_items)
         if row is None:
             self.collection_selected_details.setText('Selecciona una deuda para consultar sus importes.')
             return
+        identity = self.collection_items.item(row, 7).text()
+        entry = next((i for i in self.repository.list_collection_items() if i['receivable_id'] == identity), None)
+        if entry and entry.get('order_id'):
+            order = self.repository.get_order(entry['order_id'])
+            if order:
+                self.collection_payment_identity.set_instrument(self._brand_instrument(order['instrument_id']))
         values = [self.collection_items.item(row, c).text() for c in (0, 2, 3, 4, 5, 10)]
         self.collection_selected_details.setText(
             f'<b>{escape(values[0])}</b> · {escape(values[1])} · {escape(values[5])}<br>'
@@ -1962,6 +2088,7 @@ class MainWindow(QMainWindow):
 
     def _make_settings_page(self) -> QWidget:
         page = QWidget()
+        apply_warm_surface(page, 'warmSettings')
         layout = QVBoxLayout(page)
         title = QLabel("Configuración")
         title.setObjectName("pageTitle")
@@ -1974,8 +2101,16 @@ class MainWindow(QMainWindow):
         notice.setWordWrap(True)
         layout.addWidget(notice)
 
-        layout.addWidget(QLabel("Personas y propietario"))
+        owner_card, owner_body = warm_section('Personas y propietario')
+        layout.addWidget(owner_card)
+        self.owner_current = QLabel(); self.owner_current.setWordWrap(True)
+        owner_body.addWidget(self.owner_current)
+        self.owner_picker = QComboBox()
+        self.owner_picker.setAccessibleName('Persona activa para configurar propietario')
+        owner_body.addWidget(self.owner_picker)
+        self.owner_picker.currentIndexChanged.connect(self._pick_owner_person)
         self.owner_people_table = QTableWidget(0, 4)
+        self.owner_people_table.setParent(owner_card)
         self.owner_people_table.setObjectName("ownerPeopleTable")
         self.owner_people_table.setHorizontalHeaderLabels(
             ["ID", "Persona", "Activa", "Propietario"]
@@ -1990,35 +2125,61 @@ class MainWindow(QMainWindow):
         self.owner_people_table.itemSelectionChanged.connect(
             self._load_selected_owner
         )
-        layout.addWidget(self.owner_people_table)
+        self.owner_people_table.hide()
 
         self.owner_selection = QLabel(
             "Selecciona una persona activa para configurar el propietario."
         )
         self.owner_selection.setWordWrap(True)
-        layout.addWidget(self.owner_selection)
+        owner_body.addWidget(self.owner_selection)
         self.configure_owner_button = QPushButton("Configurar propietario")
         self.configure_owner_button.setObjectName("configureOwnerButton")
         self.configure_owner_button.clicked.connect(self._configure_owner)
-        layout.addWidget(self.configure_owner_button, alignment=Qt.AlignmentFlag.AlignRight)
+        owner_body.addWidget(self.configure_owner_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        security, security_body = warm_section('Seguridad y respaldos')
+        layout.addWidget(security)
+        explanation = QLabel('Crear respaldo conserva una copia cifrada y verificada. Restaurar reemplaza los datos activos y guarda antes una copia de seguridad.')
+        explanation.setWordWrap(True); security_body.addWidget(explanation)
         maintenance = QGridLayout()
         for column, title, slot in ((0, 'Crear respaldo cifrado', self._create_backup),
                                     (1, 'Restaurar respaldo', self._restore_backup),
                                     (2, 'Diagnóstico de integridad', self._run_integrity)):
             button = QPushButton(title)
+            if column == 1: button.setObjectName('dangerAction')
             button.clicked.connect(slot)
             if column < 2:
                 button.setEnabled(self.database.encrypted)
-            maintenance.addWidget(button, column // 2, column % 2, 1, 2 if column == 2 else 1)
-        layout.addLayout(maintenance)
+            if column < 2:
+                maintenance.addWidget(button, 0, column, alignment=Qt.AlignmentFlag.AlignLeft)
+            else:
+                diagnostic, diagnostic_body = warm_section('Diagnóstico e integridad')
+                layout.addWidget(diagnostic)
+                button.setText('Ejecutar diagnóstico')
+                diagnostic_body.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
+        maintenance.setColumnStretch(2, 1)
+        security_body.addLayout(maintenance)
         self.maintenance_result = QTextEdit()
         self.maintenance_result.setReadOnly(True)
-        self.maintenance_result.setMaximumHeight(160)
+        self.maintenance_result.setMinimumHeight(90)
         self.maintenance_result.setPlaceholderText('Restaurar requiere confirmación y crea un respaldo cifrado de la base actual.')
-        layout.addWidget(self.maintenance_result)
+        results_toggle = QPushButton('Mostrar resultados')
+        results_toggle.setCheckable(True)
+        diagnostic_body.addWidget(results_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.maintenance_result.hide()
+        results_toggle.toggled.connect(self.maintenance_result.setVisible)
+        self.maintenance_result.textChanged.connect(lambda: results_toggle.setChecked(True))
+        diagnostic_body.addWidget(self.maintenance_result)
         layout.addStretch()
         self._refresh_owner_people()
-        return page
+        return self._admin_scroll(page)
+
+    def _pick_owner_person(self):
+        identity = self.owner_picker.currentData()
+        self.owner_people_table.clearSelection()
+        for row in range(self.owner_people_table.rowCount()):
+            if self.owner_people_table.item(row, 0).text() == identity:
+                self.owner_people_table.selectRow(row)
+                break
 
     def _run_integrity(self):
         try:
@@ -2126,6 +2287,15 @@ class MainWindow(QMainWindow):
         blocker.unblock()
         self._load_selected_owner()
         self.owner_people_table.resizeColumnsToContents()
+        people = self.repository.list_people()
+        owners = [p['name'] for p in people if p['is_owner']]
+        self.owner_current.setText('Propietario actual: ' + (', '.join(owners) or 'Sin configurar'))
+        with QSignalBlocker(self.owner_picker):
+            self.owner_picker.clear()
+            self.owner_picker.addItem('Selecciona una persona activa', None)
+            for person in people:
+                if person['active']: self.owner_picker.addItem(person['name'], str(person['id']))
+            self.owner_picker.setCurrentIndex(max(0, self.owner_picker.findData(selected_id)))
 
     def _selected_owner_id(self) -> str | None:
         rows = self.owner_people_table.selectionModel().selectedRows()
@@ -2186,6 +2356,7 @@ class MainWindow(QMainWindow):
 
     def _make_users_page(self) -> QWidget:
         page = QWidget()
+        apply_warm_surface(page, 'warmUsers')
         layout = QVBoxLayout(page)
         title = QLabel("Usuarios")
         title.setObjectName("pageTitle")
@@ -2195,7 +2366,14 @@ class MainWindow(QMainWindow):
             "conserva sus movimientos y deudas históricas."
         )
         notice.setObjectName("demoBanner")
+        notice.setWordWrap(True)
         layout.addWidget(notice)
+        self.people_summary = QLabel(); self.people_summary.setWordWrap(True)
+        layout.addWidget(self.people_summary)
+        self.people_empty = QLabel('Aún no hay personas. Escribe un nombre para crear la primera.')
+        self.people_empty.setWordWrap(True); layout.addWidget(self.people_empty)
+        editor, editor_body = warm_section('Persona · crear o editar selección')
+        layout.addWidget(editor)
 
         form = QGridLayout()
         form.addWidget(QLabel("Nombre"), 0, 0)
@@ -2203,37 +2381,47 @@ class MainWindow(QMainWindow):
         self.person_name.setPlaceholderText("Nombre de la persona")
         form.addWidget(self.person_name, 0, 1)
         self.person_owner = QCheckBox("Es propietario")
+        self.person_owner.setToolTip('Identidad explícita. Cambiar el propietario requiere confirmación; no reclasifica deudas históricas.')
         form.addWidget(self.person_owner, 0, 2)
-        layout.addLayout(form)
+        editor_body.addLayout(form)
 
         actions = QGridLayout()
         self.create_person_button = QPushButton("Crear persona")
+        self.create_person_button.setObjectName('primaryAction')
         self.create_person_button.clicked.connect(self._create_person)
         actions.addWidget(self.create_person_button, 0, 0)
-        self.update_person_button = QPushButton("Guardar edición")
+        self.update_person_button = QPushButton("Guardar cambios")
         self.update_person_button.clicked.connect(self._update_person)
         actions.addWidget(self.update_person_button, 0, 1)
-        self.deactivate_person_button = QPushButton("Desactivar seleccionada")
+        self.deactivate_person_button = QPushButton("Desactivar")
+        self.deactivate_person_button.setObjectName('dangerAction')
         self.deactivate_person_button.clicked.connect(self._deactivate_person)
-        actions.addWidget(self.deactivate_person_button, 0, 2)
-        self.reactivate_person_button = QPushButton("Reactivar seleccionada")
+        actions.addWidget(self.deactivate_person_button, 1, 0)
+        self.reactivate_person_button = QPushButton("Reactivar")
         self.reactivate_person_button.clicked.connect(self._reactivate_person)
-        actions.addWidget(self.reactivate_person_button, 0, 3)
+        actions.addWidget(self.reactivate_person_button, 1, 1)
         clear_button = QPushButton("Limpiar selección")
         clear_button.clicked.connect(self._clear_person_form)
-        actions.addWidget(clear_button, 0, 4)
-        layout.addLayout(actions)
+        actions.addWidget(clear_button, 1, 2)
+        for index in range(actions.count()):
+            actions.itemAt(index).setAlignment(Qt.AlignmentFlag.AlignLeft)
+        actions.setColumnStretch(3, 1)
+        editor_body.addLayout(actions)
 
         self.people_table = QTableWidget(0, 4)
         self.people_table.setObjectName("peopleTable")
-        self.people_table.setHorizontalHeaderLabels(["ID", "Nombre", "Propietario", "Estado"])
+        self.people_table.setHorizontalHeaderLabels(["ID", "Nombre", "Tipo", "Estado"])
         self.people_table.setColumnHidden(0, True)
         self.people_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.people_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.people_table.itemSelectionChanged.connect(self._load_selected_person)
         layout.addWidget(self.people_table)
+        self.people_table.setMaximumHeight(260)
+        self.people_table.verticalHeader().setVisible(False)
+        self.people_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        layout.addStretch()
         self._refresh_people()
-        return page
+        return self._admin_scroll(page)
 
     def _make_purchases_page(self) -> QWidget:
         return self._make_legacy_purchases_page()
@@ -2625,6 +2813,8 @@ class MainWindow(QMainWindow):
         self.order_detail.setMinimumHeight(90)
         self.order_detail.setMaximumHeight(230)
         detail_section, detail_body = warm_section('Detalle del pedido seleccionado')
+        self.order_payment_identity = PaymentIdentity()
+        detail_body.addWidget(self.order_payment_identity)
         detail_body.addWidget(self.order_detail)
         layout.addWidget(detail_section)
         layout.addStretch()
@@ -2819,7 +3009,7 @@ class MainWindow(QMainWindow):
     def _load_order_catalogs(self) -> None:
         self.order_institution.clear()
         for item in self.repository.list_institutions():
-            self.order_institution.addItem(str(item["name"]), item["id"])
+            self.order_institution.addItem(brand_icon(str(item["name"]), "institution"), str(item["name"]), item["id"])
         self._refresh_order_instruments()
         # Compatibility-only object for old programmatic callers; it is not
         # part of the Pedidos layout.
@@ -2834,7 +3024,7 @@ class MainWindow(QMainWindow):
         self.order_instrument.clear()
         institution_id = self.order_institution.currentData()
         for item in self.repository.list_instruments(institution_id) if institution_id else []:
-            self.order_instrument.addItem(str(item["alias"]), item["id"])
+            self.order_instrument.addItem(brand_icon(self.order_institution.currentText(), "institution"), str(item["alias"]), item["id"])
 
     def _show_order_detail(self) -> None:
         self.accredit_refund_button.setEnabled(False)
@@ -2842,10 +3032,12 @@ class MainWindow(QMainWindow):
         self.repurchase_button.setText('Lo compré de nuevo')
         rows = self.orders_table.selectionModel().selectedRows()
         if not rows:
+            self.order_payment_identity.set_instrument(None)
             self.order_detail.clear()
             return
         order_id = self.orders_table.item(rows[0].row(), 8).text()
         order = self.repository.get_order(order_id)
+        self.order_payment_identity.set_instrument(self._brand_instrument(order["instrument_id"]) if order else None)
         if order is None:
             return
         lines = [
@@ -3296,7 +3488,7 @@ class MainWindow(QMainWindow):
     def _load_legacy_purchase_catalogs(self) -> None:
         self.purchase_institution.clear()
         for item in self.repository.list_institutions():
-            self.purchase_institution.addItem(str(item["name"]), item["id"])
+            self.purchase_institution.addItem(brand_icon(str(item["name"]), "institution"), str(item["name"]), item["id"])
         self._refresh_instruments()
         self.allocation_user.clear()
         if hasattr(self, "order_user") and self.order_user is not None:
@@ -3313,7 +3505,7 @@ class MainWindow(QMainWindow):
         self.purchase_instrument.clear()
         institution_id = self.purchase_institution.currentData()
         for item in self.repository.list_instruments(institution_id):
-            self.purchase_instrument.addItem(str(item["alias"]), item["id"])
+            self.purchase_instrument.addItem(brand_icon(self.purchase_institution.currentText(), "institution"), str(item["alias"]), item["id"])
 
     def _reset_order_allocations(self) -> None:
         self.order_allocations_table.setSortingEnabled(False)
@@ -4121,14 +4313,19 @@ class MainWindow(QMainWindow):
         selected_id = selected_id or self._selected_person_id()
         blocker = QSignalBlocker(self.people_table)
         people = self.repository.list_people()
+        self.people_summary.setText(f"Personas activas: {sum(bool(p['active']) for p in people)} · Inactivas: {sum(not p['active'] for p in people)}")
+        self.people_empty.setVisible(not people)
+        self.people_table.setVisible(bool(people))
+        self.people_table.setFixedHeight(min(260, 48 + len(people) * 32))
         self.people_table.setRowCount(0)
         for person in people:
             row = self.people_table.rowCount()
             self.people_table.insertRow(row)
             self.people_table.setItem(row, 0, QTableWidgetItem(str(person["id"])))
             self.people_table.setItem(row, 1, QTableWidgetItem(str(person["name"])))
-            owner = "Sí" if person["is_owner"] else "No"
+            owner = "Propietario" if person["is_owner"] else "Familiar"
             self.people_table.setItem(row, 2, QTableWidgetItem(owner))
+            self.people_table.item(row, 2).setForeground(QColor('#9b583b' if person['is_owner'] else '#565d55'))
             self.people_table.setItem(row, 3, QTableWidgetItem(
                 "Activo" if person["active"] else "Desactivado"
             ))
@@ -4136,6 +4333,7 @@ class MainWindow(QMainWindow):
                 self.people_table.selectRow(row)
         blocker.unblock()
         self.people_table.resizeColumnsToContents()
+        self.people_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
     def _selected_person_id(self) -> str | None:
         rows = self.people_table.selectionModel().selectedRows()
@@ -4174,6 +4372,13 @@ class MainWindow(QMainWindow):
         if person_id is None or self.repository is None:
             self._show_error("Selecciona una persona para editar.")
             return
+        person = self.repository.get_person(person_id)
+        if person and bool(person['is_owner']) != self.person_owner.isChecked():
+            if QMessageBox.question(self, 'Confirmar identidad de propietario',
+                'Se cambiará la marca de propietario de esta persona. Los identificadores, movimientos y deudas históricas se conservan. Para configurar un único propietario utiliza Configuración. ¿Guardar?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
         try:
             self.repository.update_person(
                 person_id,
@@ -4196,7 +4401,10 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Confirmar desactivación",
-            "¿Desactivar la persona seleccionada? El historial se conservará.",
+            "¿Desactivar la persona seleccionada? Ya no estará disponible para nuevas participaciones. "
+            "Su identificador, historial y deudas se conservan; sus movimientos no se reasignan.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -4477,9 +4685,10 @@ class MainWindow(QMainWindow):
         person_layout.addWidget(self.dashboard_people)
         self.dashboard_people_total = QLabel(); self.dashboard_people_total.setWordWrap(True)
         person_layout.addWidget(self.dashboard_people_total)
-        self.dashboard_person_details = QTextEdit(); self.dashboard_person_details.setReadOnly(True)
-        self.dashboard_person_details.setMinimumHeight(160); self.dashboard_person_details.setMaximumHeight(280)
-        self.dashboard_person_details.hide(); details.toggled.connect(self.dashboard_person_details.setVisible)
+        self.dashboard_person_details = HomePeopleBreakdown()
+        self.dashboard_person_details.hide()
+        details.toggled.connect(self._toggle_person_breakdown)
+        self.dashboard_person_details.person_selected.connect(self._select_breakdown_person)
         person_layout.addWidget(self.dashboard_person_details)
         self.dashboard_tables_grid.addWidget(self.dashboard_card_section, 0, 0)
         self.dashboard_tables_grid.addWidget(self.dashboard_person_section, 0, 1)
@@ -4571,6 +4780,8 @@ class MainWindow(QMainWindow):
                     item.setToolTip(value)
                     if column in (1, 2, 4, 5):
                         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    if column == 0:
+                        item.setIcon(brand_icon(comparison["institution_name"], "institution"))
                     self.dashboard_cards.setItem(row, column, item)
             discount = int(summary['discount_benefit_cents'])
             personal = int(summary["personal_pending_cents"])
@@ -4648,6 +4859,8 @@ class MainWindow(QMainWindow):
         self.dashboard_people_total.setText(f'Mi pendiente: {format_money(own)} · Otras personas: {format_money(family)} · Total registrado: {format_money(own+family)}. Previsiones excluidas del total.')
         self._fit_dashboard_table(self.dashboard_people)
         self._show_person_statement()
+        if self.dashboard_person_toggle.isChecked():
+            self.dashboard_person_details.set_data(people, self.repository.list_collection_items() if self.repository else [])
         planned = self.repository.upcoming_obligations() if self.repository else []
         self.dashboard_upcoming.clear()
         for item in planned:
@@ -4796,10 +5009,19 @@ class MainWindow(QMainWindow):
     def _show_person_statement(self):
         identity = self._table_id(self.dashboard_people,5)
         self.dashboard_person_pdf.setEnabled(bool(identity))
-        if identity:
-            self.dashboard_person_details.setHtml(person_statement_html(self.repository.family_statement(identity)))
-        else:
-            self.dashboard_person_details.clear()
+
+    def _toggle_person_breakdown(self, checked):
+        if checked:
+            self.dashboard_person_details.set_data(
+                self.repository.people_debt_summary() if self.repository else [],
+                self.repository.list_collection_items() if self.repository else [])
+        self.dashboard_person_details.setVisible(checked)
+
+    def _select_breakdown_person(self, identity):
+        for row in range(self.dashboard_people.rowCount()):
+            if self.dashboard_people.item(row, 5).text() == identity:
+                self.dashboard_people.selectRow(row)
+                break
 
     @staticmethod
     def _make_card(label: str, value: str) -> QFrame:
@@ -4855,13 +5077,24 @@ class MainWindow(QMainWindow):
         item = table.item(rows[0].row(), column) if rows else None
         return item.text() if item is not None else None
 
-    @staticmethod
-    def _fill_combo(combo: QComboBox, choices: list[tuple[str, object]]) -> None:
+    def _brand_instrument(self, identity):
+        return next((i for i in self.repository.list_all_instruments() if i['id'] == identity), None)
+
+    def _fill_combo(self, combo: QComboBox, choices: list[tuple[str, object]]) -> None:
         selected = combo.currentData()
+        institution_fields = ('order_institution', 'card_institution', 'purchase_institution', 'admin_institution', 'admin_card_institution')
+        instrument_fields = ('order_instrument', 'card_instrument', 'purchase_instrument')
+        brands = {}
+        if any(combo is getattr(self, name, None) for name in institution_fields):
+            brands = {i['id']: i['name'] for i in self.repository.list_all_institutions()}
+        elif any(combo is getattr(self, name, None) for name in instrument_fields):
+            brands = {i['id']: i['institution_name'] for i in self.repository.list_all_instruments()}
         with QSignalBlocker(combo):
             combo.clear()
             for label, value in choices:
                 combo.addItem(label, value)
+                if brands and value in brands:
+                    combo.setItemIcon(combo.count()-1, brand_icon(brands[value], 'institution'))
             index = combo.findData(selected)
             if index >= 0:
                 combo.setCurrentIndex(index)
@@ -5022,32 +5255,7 @@ def create_application(argv: list[str] | None = None) -> QApplication:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Valenza.Desktop')
         application = QApplication(argv if argv is not None else sys.argv)
         application.setWindowIcon(QIcon(str(Path(__file__).parent / 'assets' / 'icono_app_claro.png')))
-    application.setStyleSheet(
-        """
-        QWidget { font-size: 14px; }
-        QPushButton { min-height: 26px; padding: 4px 10px; border: 1px solid #aebdce; border-radius: 4px; background: #f8fafc; color: #182536; }
-        QPushButton:hover { background: #edf4fc; }
-        QPushButton:focus { border-color: #2563eb; }
-        QPushButton:disabled { background: #edf1f5; color: #64748b; border-color: #cbd5e1; }
-        QPushButton#primaryAction { background: #1d4ed8; color: white; border-color: #1d4ed8; }
-        QPushButton#primaryAction:disabled { background: #edf1f5; color: #64748b; border-color: #cbd5e1; }
-        QLineEdit, QComboBox, QSpinBox { min-height: 22px; padding: 3px; }
-        QComboBox { min-height: 26px; padding: 4px; border: 1px solid #aebdce; border-radius: 4px; }
-        QTableWidget { gridline-color: #dbe2ea; selection-background-color: #dceafb; selection-color: #102a43; }
-        QHeaderView::section { padding: 5px; font-weight: 600; }
-        #pageTitle { font-size: 24px; font-weight: 600; }
-        #demoBanner, #securityNotice {
-            padding: 10px; background: #fff3cd; color: #664d03;
-            border: 1px solid #ffda6a; border-radius: 4px;
-        }
-        #summaryCard {
-            padding: 8px; border: 1px solid #d8dee9;
-            border-radius: 6px; background: #f7f9fc;
-        }
-        #summaryAmount { font-size: 20px; font-weight: 600; }
-        QListWidget#navigation { padding: 6px; }
-        """
-    )
+    install_design_system(application)
     return application
 
 

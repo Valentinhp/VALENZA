@@ -10,6 +10,8 @@ from valenza.ocr.order_import import money, validate, RECEIPT_FIELD_NAMES
 from valenza.persistence.database import DATABASE_ERRORS
 from valenza.finance.refund_repurchase import refund_repurchase_amounts
 from valenza.gui.warm_finance import apply_warm_surface, FinancialSummary, line_icon
+from valenza.gui.branding import brand_icon
+from valenza.gui.design_system import WarmScrollArea
 
 
 def pesos(cents):
@@ -115,7 +117,7 @@ class ProductRefundEditor(QWidget):
         for instrument in instruments:
             kind = {'WALLET_BALANCE': 'Billetera', 'CREDIT_CARD': 'Tarjeta',
                     'CREDIT_LINE': 'Crédito', 'OTHER': 'Otro'}[instrument['instrument_type']]
-            self.destination.addItem(f"{instrument['alias']} ({kind})", instrument['id'])
+            self.destination.addItem(brand_icon(instrument.get('institution_name', ''), 'institution'), f"{instrument['alias']} ({kind})", instrument['id'])
         self.accredited_at = QLineEdit()
         self.accredited_at.setPlaceholderText('AAAA-MM-DD')
         self.accredited_at.setMaximumWidth(125)
@@ -134,7 +136,7 @@ class ProductRefundEditor(QWidget):
         self.repurchase_instrument = QComboBox()
         self.repurchase_instrument.addItem('Confirma el medio de pago', None)
         for instrument in instruments:
-            self.repurchase_instrument.addItem(instrument['alias'], instrument['id'])
+            self.repurchase_instrument.addItem(brand_icon(instrument.get('institution_name', ''), 'institution'), instrument['alias'], instrument['id'])
         self.apply_surplus = QCheckBox('Aplicar sobrante a compra original')
         for widget in (QLabel('Recompra $'), self.repurchase_amount, QLabel('Fecha'),
                        self.repurchase_date, self.repurchase_instrument, self.apply_surplus):
@@ -217,7 +219,7 @@ class RefundRepurchaseDialog(QDialog):
             people = [p for p in people if p['id'] in allowed]
             self.setWindowTitle('Editar reparto de devolución/recompra')
         self.editor = ProductRefundEditor(people,
-            repository.list_instruments(), lambda: refund['original_cents'], self)
+            [i for i in repository.list_all_instruments() if i['active']], lambda: refund['original_cents'], self)
         self.editor.product_name.setText(f"Producto devuelto #{refund['product_index'] + 1}")
         self.editor.amount.setText(pesos(refund['amount_cents']))
         self.editor.status.setCurrentIndex(self.editor.status.findData(refund['status']))
@@ -264,7 +266,7 @@ class RefundRepurchaseDialog(QDialog):
         purchase_form.addRow('Medio de pago', self.editor.repurchase_instrument)
         purchase_form.addRow(self.editor.apply_surplus)
         purchase_layout.addLayout(purchase_form)
-        self.scroll_area = QScrollArea(self)
+        self.scroll_area = WarmScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -425,8 +427,9 @@ class ImportPreview(QDialog):
         self.merchant = QLineEdit('Recarga ' + draft['company'] if self.is_service else draft.get('merchant', 'Mercado Pago'))
         self.instrument = QComboBox()
         self.instrument.addItem('Selecciona la tarjeta o medio de pago', None)
-        for instrument in repository.list_instruments():
-            self.instrument.addItem(str(instrument['alias']), instrument['id'])
+        for instrument in repository.list_all_instruments():
+            if instrument['active']:
+                self.instrument.addItem(brand_icon(instrument['institution_name'], 'institution'), str(instrument['alias']), instrument['id'])
         for row, column, label, widget in [(0, 0, 'Comercio', self.merchant),
                                            (0, 2, 'Fecha', self.fields['date']),
                                            (1, 0, 'Tarjeta / instrumento', self.instrument),
@@ -503,7 +506,7 @@ class ImportPreview(QDialog):
         toolbar.addStretch(1)
         layout.addLayout(toolbar, 0)
         layout.addWidget(self.table, 0)
-        self.refund_editor = ProductRefundEditor(self.people, repository.list_instruments(),
+        self.refund_editor = ProductRefundEditor(self.people, [i for i in repository.list_all_instruments() if i['active']],
             lambda: self.product_original(self.refund_source), self)
         self.refund_editor.hide()
         layout.addWidget(self.refund_editor, 0)

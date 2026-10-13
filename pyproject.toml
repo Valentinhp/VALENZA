@@ -28,4 +28,4 @@ addopts = "-q"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"valenza.gui" = ["assets/*.png"]
+"valenza.gui" = ["assets/*.png", "assets/brands/*.svg", "assets/brands/*.json", "assets/brands/*.md", "assets/controls/*.svg"]

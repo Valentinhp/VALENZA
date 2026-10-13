@@ -12,12 +12,13 @@ from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
-def synthetic():
+def synthetic(tmp_path):
     app = create_application([])
     font = QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
     if font >= 0:
         app.setFont(QFont(QFontDatabase.applicationFontFamilies(font)[0], 10))
-    db = LocalDatabase.open(':memory:', 'synthetic', allow_synthetic_in_memory=True)
+    db = LocalDatabase.open(tmp_path / 'synthetic-home.db', 'synthetic-home-test')
+    assert db.encrypted
     db.migrate()
     repo = FinanceRepository(db)
     for key, name in [('owner', 'Yo'), ('ana', 'Ana'), ('luis', 'Luis'), ('sofia', 'Sofía · familiar con nombre largo')]:
