@@ -299,7 +299,7 @@ Esta etiqueta **no reemplaza un respaldo cifrado de tus datos**.
 
 ## 📌 Alcance actual
 
-Valenza es una herramienta de **organización y seguimiento financiero**, no un servicio bancario. Incluye comparación bancaria **manual**, con consultas y desgloses, pero actualmente **no realiza conciliación bancaria automática ni OCR en la nube**. Los saldos consultados manualmente y los compromisos previstos se mantienen diferenciados de los movimientos confirmados. Tampoco realiza pagos al banco ni cancela servicios con proveedores.
+Valenza es una herramienta local de **organización y seguimiento financiero**. Permite registrar compras, repartir gastos, llevar cobros y pagos, revisar efectivo y comparar tus cuentas con la información que consultas en el banco. Procesa los documentos localmente y distingue los saldos consultados, los compromisos previstos y los movimientos registrados para que puedas entender y comprobar tus cuentas.
 
 <div align="center">
 
