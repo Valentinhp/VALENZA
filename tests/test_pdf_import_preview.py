@@ -40,6 +40,40 @@ def select(widget, person):
     widget.person.setCurrentIndex(widget.person.findData(person))
 
 
+def test_shared_summary_does_not_claim_owner_and_reduces_zero_fields(preview):
+    dialog,repo,errors=preview
+    row=assignment(dialog);row.divide.setChecked(True)
+    row.amounts['owner'].setText('100.00');row.amounts['friend'].setText('150.70')
+    assert row.shared_summary.text()=='Compartido · 2 personas'
+    assert row.person.isHidden()
+    assert row.shares()=={'owner':10000,'friend':15070}
+    row.amounts['friend'].setText('0.00')
+    assert row.amounts['friend'].isHidden()
+    row.add_person.setCurrentIndex(row.add_person.findData('friend'))
+    assert not row.amounts['friend'].isHidden()
+
+
+def test_import_msi_single_order_preserves_amounts_and_dates(preview):
+    dialog,repo,errors=preview
+    dialog.msi_enabled.setChecked(True);dialog.msi_count.setValue(3)
+    dialog.msi_first_due.setText('2026-01-31')
+    dialog.save()
+    assert not errors and len(repo.list_orders())==1
+    order=repo.get_order(repo.list_orders()[0]['id'])
+    assert order['purchase_mode']=='MSI'
+    assert [i['due_date'] for i in order['installments']]==['2026-01-31','2026-02-28','2026-03-31']
+    assert sum(i['principal_cents'] for i in order['installments'])==order['charged_cents']
+    assert repo.count('institution_payment')==repo.count('user_payment')==0
+
+
+def test_import_msi_invalid_first_date_has_no_partial_records(preview):
+    dialog,repo,errors=preview
+    dialog.msi_enabled.setChecked(True);dialog.msi_first_due.setText('2026-02-31')
+    before=repo.database.connection.total_changes
+    dialog.save()
+    assert errors and not repo.list_orders() and repo.database.connection.total_changes==before
+
+
 def test_preview_and_cancel_do_not_record_orders(preview):
     dialog, repository, _ = preview
     assert repository.list_orders() == []

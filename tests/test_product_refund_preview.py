@@ -403,8 +403,14 @@ def test_pedidos_modal_dynamic_fields_never_grow_dialog(preview, monkeypatch, tm
             bar = saved.scroll_area.verticalScrollBar()
             assert bar.maximum() > 0
             # Visit every dynamic amount and purchase field with the real scroll.
+            assert any(field.isHidden() for field in editor.allocation.amounts.values())
             for field in [*editor.allocation.amounts.values(), editor.repurchase_amount,
                           editor.repurchase_date, editor.repurchase_instrument, editor.apply_surplus]:
+                if field in editor.allocation.amounts.values() and field.isHidden():
+                    person=next(key for key,value in editor.allocation.amounts.items() if value is field)
+                    editor.allocation.add_person.setCurrentIndex(editor.allocation.add_person.findData(person))
+                    QApplication.processEvents()
+                    assert not field.isHidden()
                 saved.scroll_area.ensureWidgetVisible(field)
                 QApplication.processEvents()
                 assert saved.scroll_area.viewport().rect().contains(
@@ -601,7 +607,13 @@ def test_pedidos_import_scroll_contains_all_return_options(preview, monkeypatch,
                 assert not dialog.scroll_area.isAncestorOf(button)
                 assert dialog.rect().contains(button.mapTo(dialog, button.rect().bottomRight()))
             assert dialog.scroll_area.verticalScrollBar().maximum() > 0
+            assert any(field.isHidden() for field in editor.allocation.amounts.values())
             for field in [*editor.allocation.amounts.values(), editor.repurchase_amount, editor.repurchase_date]:
+                if field in editor.allocation.amounts.values() and field.isHidden():
+                    person=next(key for key,value in editor.allocation.amounts.items() if value is field)
+                    editor.allocation.add_person.setCurrentIndex(editor.allocation.add_person.findData(person))
+                    QApplication.processEvents()
+                    assert not field.isHidden()
                 dialog.scroll_area.ensureWidgetVisible(field)
                 QApplication.processEvents()
                 assert dialog.scroll_area.viewport().rect().contains(

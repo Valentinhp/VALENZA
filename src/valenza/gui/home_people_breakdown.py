@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QTransform
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QHBoxLayout,
                               QVBoxLayout, QGridLayout, QSizePolicy)
-from valenza.gui.warm_finance import format_money
+from valenza.gui.warm_finance import format_money, date_label
 
 
 class OrderAmountsRow(QFrame):
@@ -20,7 +20,7 @@ class OrderAmountsRow(QFrame):
         self.title.setWordWrap(True)
         self.title.setObjectName('orderCaption')
         layout.addWidget(self.title)
-        date = str(entry['source_date'])[:10] if entry.get('source_date') else 'Fecha sin registrar'
+        date = date_label(str(entry['source_date'])[:10]) if entry.get('source_date') else 'Fecha sin registrar'
         kind = ' · Compra histórica' if entry.get('purchase_id') and not entry.get('order_id') else ''
         status = ' · Liquidado' if entry['remaining_cents'] == 0 else ''
         meta = QLabel(date + kind + status)

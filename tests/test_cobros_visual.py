@@ -107,6 +107,12 @@ def test_explicit_collection_actions(tmp_path, monkeypatch):
     window.collection_history_toggle.setChecked(True)
     window.collection_history.selectRow(0)
     window.collection_amount.setText('15.00')
+    from valenza.gui.receipt_editor import ReceiptEditDialog
+    from PySide6.QtWidgets import QDialog
+    def edit_receipt(dialog):
+        dialog.amount.setText('15.00')
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ReceiptEditDialog,'exec',edit_receipt)
     window.edit_receipt_button.click()
     assert repo.list_collection_items()[0]['remaining_cents'] == 8500
     window.collection_history.selectRow(0)

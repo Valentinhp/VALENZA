@@ -137,7 +137,7 @@ def test_subscription_ui_small_and_save(repository,monkeypatch,tmp_path):
         fields[0].setText('Servicio sintético'); fields[1].setText('100.01')
         fields[3].setText('100.01')
         buttons=dialog.findChildren(QPushButton)
-        save=next(b for b in buttons if b.text()=='Guardar')
+        save=next(b for b in buttons if b.text()=='Crear suscripción')
         assert save.isVisible() and save.mapTo(dialog,save.rect().bottomRight()).y()<dialog.height()
         dialog.grab().save(str(tmp_path/'subscription-dialog-small.png'))
         save.click()

@@ -8,13 +8,14 @@ from valenza.gui.app import MainWindow, create_application
 
 
 @pytest.fixture
-def monthly_repo(monkeypatch):
+def monthly_repo(monkeypatch, tmp_path):
     class FixedDate(date):
         @classmethod
         def today(cls):
             return cls(2026,10,11)
     monkeypatch.setattr(repository_module,'date',FixedDate)
-    db=LocalDatabase.open(':memory:','synthetic',allow_synthetic_in_memory=True)
+    db=LocalDatabase.open(tmp_path/'synthetic-monthly.db','synthetic')
+    assert db.encrypted
     db.migrate()
     repo=FinanceRepository(db)
     repo.add_person('owner','Yo',is_owner=True)
@@ -50,7 +51,7 @@ def test_cards_and_home_month_sum_one_installment_not_three(monthly_repo):
     assert window.cards_table.item(0,4).text()=='$1,423.98 MXN'
     assert window.cards_table.item(0,5).text()=='$474.66 MXN'
     assert window.cards_table.item(0,6).text()=='$949.32 MXN'
-    assert 'este mes: $474.66 MXN' in window.card_detail.text()
+    assert 'Programación vigente antes de pagos: $474.66 MXN' in window.card_detail.text()
     assert 'MSI por pagar hasta hoy: Por confirmar' in window.card_detail.text()
     assert 'MSI por pagar hasta hoy: $0.00' not in window.card_detail.text()
     window._show_page(MainWindow.PAGES.index('Inicio'))
@@ -58,8 +59,8 @@ def test_cards_and_home_month_sum_one_installment_not_three(monthly_repo):
     assert 'Meses futuros' not in window.dashboard_monthly_installments.text()
     assert 'Meses anteriores' not in window.dashboard_monthly_installments.text()
     assert 'Sin fecha' not in window.dashboard_monthly_installments.text()
-    assert '$474.66 MXN' in window.dashboard_cards_total.text()
-    assert window.dashboard_cards.item(0, 1).text() == '$474.66 MXN'
+    assert '$1,423.98 MXN' in window.dashboard_cards_total.text()
+    assert window.dashboard_cards.item(0, 1).text() == '$1,423.98 MXN'
     assert window.dashboard_debt.findChild(QLabel, 'summaryAmount').text() == '$474.66 MXN'
     assert repo.database.connection.total_changes==before
     assert len(repo.list_orders())==1

@@ -22,6 +22,14 @@ def test_document_preserves_all_financial_amounts_and_database(tmp_path):
             expected += [c['amount_cents'] for row in statement['rows'] for c in final_concepts(row, repo)]
             expected += [r['amount_cents'] for row in statement['rows'] for r in row['receipts']]
             expected += [item['amount_cents'] for item in statement.get('forecasts', []) if item['kind'] in ('MSI', 'SUBSCRIPTION')]
+            if statement.get('is_owner'):
+                from valenza.gui.personal_result import personal_result
+                projection=personal_result(repo)
+                expected += [projection['discount_cents'],abs(projection['result_cents'])]
+                for row in projection['rows']:
+                    expected += [row['cost_cents'],row['family_cents'],abs(row['result_cents'])]
+                expected += [sum(r['cost_cents'] for r in projection['rows']),
+                             sum(r['family_cents'] for r in projection['rows']),abs(projection['result_cents'])]
             with pymupdf.open(path) as document:
                 text = ''.join(page.get_text() for page in document)
                 found = Counter(re.findall(r'\$[\d,]+\.\d{2} MXN', text))

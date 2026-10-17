@@ -65,6 +65,12 @@ def test_personal_collection_filter_and_immediate_balances(application, tmp_path
                for i in range(window.dashboard_movements.count()))
     window.collection_history.selectRow(0)
     window.collection_amount.setText("5.00")
+    from valenza.gui.receipt_editor import ReceiptEditDialog
+    from PySide6.QtWidgets import QDialog
+    def edit_personal(dialog):
+        dialog.amount.setText('5.00')
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ReceiptEditDialog,'exec',edit_personal)
     window._edit_selected_receipt()
     assert window.collection_items.item(0, 5).text() == "$35.00 MXN"
     window.collection_history.selectRow(0)

@@ -16,6 +16,10 @@ class FinanceRepository:
     def __init__(self, database: LocalDatabase):
         self.database = database
 
+    def search_records(self, query, *, limit=5, budget_ms=180):
+        from valenza.persistence.search import search_records
+        return search_records(self, query, limit=limit, budget_ms=budget_ms)
+
     def add_person(self, person_id: str, name: str, *, is_owner: bool = False) -> None:
         with self.database.transaction() as connection:
             connection.execute(
@@ -24,11 +28,15 @@ class FinanceRepository:
             )
 
     def save_subscription(self, *, subscription_id, name, amount_cents, instrument_id,
-                          next_due, allocations, expected_revision=None, actor='desktop'):
+                          next_due, allocations, expected_revision=None, actor='desktop',
+                          reduce_posted_surcharges=False,expected_surcharge_state=None):
         next_due = self._required_iso_date(next_due, 'El próximo cobro')
         if not name.strip() or type(amount_cents) is not int or amount_cents <= 0:
             raise ValueError('Indica nombre e importe positivo de la suscripción.')
+        if reduce_posted_surcharges and self.database.connection.in_transaction:
+            raise ValueError('Finaliza la operación actual antes de actualizar recargos anteriores.')
         with self.database.transaction() as connection:
+            if reduce_posted_surcharges:connection.execute('BEGIN IMMEDIATE')
             old = connection.execute('SELECT * FROM subscription WHERE id=?', (subscription_id,)).fetchone()
             if old and (old['status'] == 'CANCELLED' or expected_revision != old['revision']):
                 raise ValueError('La suscripción cambió o está cancelada; vuelve a seleccionarla.')
@@ -50,6 +58,12 @@ class FinanceRepository:
                 seen.add(item['user_id'])
             if sum(a['amount_cents'] for a in allocations) != amount_cents or not any(people[p]['is_owner'] for p in seen):
                 raise ValueError('El reparto debe sumar el importe e incluir Yo, aunque sea con cero.')
+            if reduce_posted_surcharges and old:
+                from .subscription_fees import preview,apply
+                plan=preview(self,subscription_id,{a['user_id']:a.get('surcharge_cents',0) for a in allocations})
+                if expected_surcharge_state is not None and plan['token']!=expected_surcharge_state:
+                    raise ValueError('Los cargos, abonos o el recuento cambiaron; revisa nuevamente el desglose antes de guardar.')
+                apply(self,plan,actor)
             day = date.fromisoformat(next_due).day
             # Preserve a 29/30/31 anchor when a clamped February date is unchanged.
             if old and old['next_due'] == next_due:
@@ -670,7 +684,7 @@ class FinanceRepository:
         return sorted(result,key=lambda r:(r['due_date'] is None,r['due_date'] or '',r['number']))
 
     def family_statement(self, user_id):
-        person = self.database.connection.execute('SELECT name FROM person WHERE id=?', (user_id,)).fetchone()
+        person = self.database.connection.execute('SELECT name,is_owner FROM person WHERE id=?', (user_id,)).fetchone()
         if person is None:
             raise ValueError('Selecciona una persona registrada.')
         rows = []
@@ -699,7 +713,7 @@ class FinanceRepository:
                              financial_detail=None if not order else dict(original_cents=order['original_cents'],discount_cents=order['discount_cents'],charged_cents=order['charged_cents'],
                              purchase_mode=order['purchase_mode'],refunds=self.list_product_refunds(order['id']),
                              subscription=self.database.connection.execute('SELECT s.name FROM subscription_charge c JOIN subscription s ON s.id=c.subscription_id WHERE c.order_id=?',(order['id'],)).fetchone())))
-        return dict(person=person['name'], rows=rows, forecasts=[f for f in self.upcoming_obligations() if f['user_id']==user_id],
+        return dict(person=person['name'], is_owner=bool(person['is_owner']), rows=rows, forecasts=[f for f in self.upcoming_obligations() if f['user_id']==user_id],
                     assigned_cents=sum(int(r['sale_cents']) for r in rows),
                     paid_cents=sum(int(r['paid_cents']) for r in rows),
                     remaining_cents=sum(int(r['remaining_cents']) for r in rows))
@@ -1518,7 +1532,8 @@ class FinanceRepository:
                 SELECT COALESCE(SUM(ra.amount_cents), 0)
                 FROM receipt_application ra
                 JOIN receivable r ON r.id = ra.receivable_id
-                WHERE r.order_id = ? AND ra.application_status = 'ACTIVE'
+                JOIN user_payment up ON up.id = ra.payment_id
+                WHERE r.order_id = ? AND ra.application_status = 'ACTIVE' AND up.payment_status = 'ACTIVE'
                 """,
                 (order_id,),
             ).fetchone()[0]
@@ -2756,11 +2771,7 @@ class FinanceRepository:
             ).fetchone()[0]
             if used + amount_cents > payment["amount_cents"]:
                 raise ValueError("Las aplicaciones exceden el cobro")
-            applied_to_receivable = connection.execute(
-                "SELECT COALESCE(SUM(amount_cents), 0) FROM receipt_application "
-                "WHERE receivable_id = ? AND application_status = 'ACTIVE'",
-                (receivable_id,),
-            ).fetchone()[0]
+            applied_to_receivable = self._active_receipts_total(connection, receivable_id)
             if applied_to_receivable + amount_cents > receivable["sale_cents"]:
                 raise ValueError("La aplicacion excede la cuenta por cobrar")
             connection.execute(
@@ -2777,6 +2788,16 @@ class FinanceRepository:
                 {"receivable_id": receivable_id, "amount_cents": amount_cents,
                  "payment_kind": receivable["participant_role"]}, entity_type="receipt",
             )
+
+    @staticmethod
+    def _active_receipts_total(connection, receivable_id, exclude_payment_id=None):
+        """One definition for receipt validation, including inconsistent legacy data."""
+        return int(connection.execute(
+            """SELECT COALESCE(SUM(ra.amount_cents),0) FROM receipt_application ra
+               JOIN user_payment up ON up.id=ra.payment_id
+               WHERE ra.receivable_id=? AND ra.application_status='ACTIVE'
+                 AND up.payment_status='ACTIVE' AND (? IS NULL OR up.id<>?)""",
+            (receivable_id,exclude_payment_id,exclude_payment_id)).fetchone()[0])
 
     def list_collection_items(self) -> list[dict[str, object]]:
         rows = self.database.connection.execute(
@@ -2803,6 +2824,8 @@ class FinanceRepository:
             LEFT JOIN purchase pu ON pu.id = r.purchase_id
             LEFT JOIN receipt_application ra
                 ON ra.receivable_id = r.id AND ra.application_status = 'ACTIVE'
+                AND EXISTS (SELECT 1 FROM user_payment up
+                            WHERE up.id = ra.payment_id AND up.payment_status = 'ACTIVE')
             WHERE r.order_id IS NULL OR o.order_status = 'ACTIVE'
             GROUP BY r.id, r.user_id, p.name, r.order_id, r.purchase_id,
                      o.merchant, pu.merchant, o.ordered_at, pu.purchased_at, r.sale_cents
@@ -2836,6 +2859,16 @@ class FinanceRepository:
         result.sort(key=lambda item: (str(item["user_name"]).casefold(),
                                      str(item["source_name"] or ""), str(item["source_id"])))
         return result
+
+    def receipt_inconsistencies(self) -> list[dict[str, object]]:
+        """Read-only diagnostic. Never repair historical payment/application states."""
+        return [dict(row) for row in self.database.connection.execute(
+            """SELECT ra.payment_id, ra.receivable_id, ra.amount_cents,
+                      up.payment_status, up.received_at
+               FROM receipt_application ra JOIN user_payment up ON up.id = ra.payment_id
+               WHERE ra.application_status = 'ACTIVE' AND up.payment_status <> 'ACTIVE'
+               ORDER BY ra.payment_id, ra.receivable_id"""
+        )]
 
     def _historical_personal_participations(self, existing: list[dict[str, object]]) -> list[dict[str, object]]:
         """Proyección de repartos conservados; consultar no crea cuentas ni abonos."""
@@ -3016,12 +3049,7 @@ class FinanceRepository:
         with self.database.transaction() as connection:
             receivable = self._ensure_participation(connection, receivable_id, actor)
             self._require_active_receivable(connection, receivable_id)
-            paid = connection.execute(
-                "SELECT COALESCE(SUM(amount_cents), 0) "
-                "FROM receipt_application "
-                "WHERE receivable_id = ? AND application_status = 'ACTIVE'",
-                (receivable_id,),
-            ).fetchone()[0]
+            paid = self._active_receipts_total(connection, receivable_id)
             if int(paid) + amount_cents > int(receivable["sale_cents"]):
                 raise ValueError("El abono excede el saldo pendiente.")
             connection.execute(
@@ -3092,11 +3120,7 @@ class FinanceRepository:
                 self._require_active_receivable(connection, application["receivable_id"])
                 account = next(i for i in self.list_collection_items()
                                if i['receivable_id'] == application['receivable_id'])
-                others = connection.execute(
-                    "SELECT COALESCE(SUM(amount_cents), 0) FROM receipt_application "
-                    "WHERE receivable_id = ? AND payment_id != ? AND application_status = 'ACTIVE'",
-                    (application["receivable_id"], payment_id),
-                ).fetchone()[0]
+                others = self._active_receipts_total(connection, application['receivable_id'], payment_id)
                 if amount_cents + int(others) > int(account["sale_cents"]):
                     raise ValueError("El abono excede la participación pendiente.")
                 connection.execute("UPDATE receipt_application SET amount_cents = ? "
@@ -3186,6 +3210,7 @@ class FinanceRepository:
             SELECT up.id, up.received_at, up.amount_cents, up.reference,
                    up.payment_status, up.cancelled_at, up.cancellation_reason, up.payment_kind,
                    p.name AS user_name, p.id AS user_id, ra.receivable_id,
+                   ra.amount_cents AS application_cents, ra.application_status,
                    r.participant_role, r.order_id, r.purchase_id,
                    COALESCE(o.merchant, pu.merchant, 'Sin pedido asignado') AS source_name
             FROM user_payment up
@@ -3263,42 +3288,21 @@ class FinanceRepository:
             'participations': participations,
         }
 
-    def record_bank_balance(self, instrument_id, amount_cents, consulted_at, *, actor='desktop'):
-        """A consultation is evidence, never an opening balance or a movement."""
-        if type(amount_cents) is not int or amount_cents < 0:
-            raise ValueError('El saldo adeudado total debe ser un importe no negativo en centavos.')
-        consulted_at = date.fromisoformat(consulted_at).isoformat()
-        with self.database.transaction() as connection:
-            instrument = connection.execute('SELECT instrument_type FROM payment_instrument WHERE id=?', (instrument_id,)).fetchone()
-            if instrument is None or instrument['instrument_type'] not in ('CREDIT_CARD', 'CREDIT_LINE'):
-                raise ValueError('Selecciona una tarjeta o línea de crédito; una billetera no es deuda bancaria.')
-            self._insert_person_audit(connection, instrument_id, 'BANK_BALANCE_QUERIED', actor, None,
-                dict(amount_cents=amount_cents, consulted_at=consulted_at, currency='MXN'), entity_type='instrument')
+    def record_bank_balance(self, instrument_id, amount_cents, consulted_at, *, balance_type='TOTAL', actor='desktop', period=None, balance_label='', closing_date=None, due_date=None, total_confirmed=True):
+        from .bank_reconciliation import BankReconciliation
+        BankReconciliation(self).record(instrument_id, amount_cents, consulted_at, balance_type, actor, period=period, balance_label=balance_label, closing_date=closing_date, due_date=due_date, total_confirmed=total_confirmed)
 
-    def list_bank_comparisons(self):
-        queries = {}
-        for row in self.database.connection.execute(
-                "SELECT entity_id,new_value FROM audit_event WHERE entity_type='instrument' AND action='BANK_BALANCE_QUERIED' ORDER BY rowid"):
-            value = json.loads(row['new_value'])
-            value['consulted_at'] = date.fromisoformat(value['consulted_at']).isoformat()
-            previous = queries.get(row['entity_id'])
-            if previous is None or value['consulted_at'] >= previous['consulted_at']:
-                queries[row['entity_id']] = value
-        result = []
-        for card in self.list_card_summaries(include_inactive=True):
-            if card['instrument_type'] not in ('CREDIT_CARD', 'CREDIT_LINE'):
-                continue
-            query = queries.get(card['instrument_id'])
-            result.append(dict(instrument_id=card['instrument_id'], alias=card['alias'],
-                institution_name=card['institution_name'], calculated_cents=int(card['remaining_cents']),
-                current_month_cents=max(0, int(card['remaining_cents'])
-                    - int(card['scheduled_future_cents'])
-                    - int(card['scheduled_overdue_cents'])
-                    - int(card['scheduled_undated_cents'])),
-                reported_cents=query['amount_cents'] if query else None,
-                consulted_at=query['consulted_at'] if query else None,
-                difference_cents=query['amount_cents'] - int(card['remaining_cents']) if query else None))
-        return result
+    def list_bank_comparisons(self, *, as_of=None):
+        from .bank_reconciliation import BankReconciliation
+        return BankReconciliation(self).comparisons(as_of or date.today())
+
+    def list_bank_reconciliation_history(self, account_id=None):
+        from .bank_reconciliation import BankReconciliation
+        return BankReconciliation(self).history(account_id)
+
+    def set_bank_reconciliation_scope(self, instrument_id, account_id, *, actor='desktop'):
+        from .bank_reconciliation import BankReconciliation
+        BankReconciliation(self).set_scope(instrument_id, account_id, actor)
 
     def dashboard_summary(self) -> dict[str, object]:
         """Resumen de operaciones registradas; no sustituye un estado bancario."""

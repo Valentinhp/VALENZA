@@ -66,10 +66,10 @@ def test_representative_home_polish(synthetic, size, tmp_path):
     window.show()
     app.processEvents()
     amount = lambda widget: widget.findChild(QLabel, 'summaryAmount').text()
-    assert amount(window.dashboard_debt) == format_money(sum(x['current_month_cents'] for x in before['bank_comparisons']))
+    assert amount(window.dashboard_debt) == '$704.66 MXN'  # Original residual includes the normal purchase.
     assert amount(window.dashboard_personal) == format_money(before['personal_pending_cents'])
     assert amount(window.dashboard_receivables) == format_money(before['receivables_cents'])
-    assert amount(window.dashboard_msi) == '$474.66 MXN'
+    assert amount(window.dashboard_msi) == format_money(before['institutional_balance_cents'])
     assert window.dashboard_bar_chart.values[0][1] == window.dashboard_month_commitments
     amounts = [card.findChild(QLabel, 'summaryAmount').text() for card in window.dashboard_calendar_cards]
     assert amounts == ['$474.66 MXN'] * 3
@@ -88,7 +88,7 @@ def test_representative_home_polish(synthetic, size, tmp_path):
         window._show_page(0)
     window.dashboard_calendar_toggle.click()
     captions = [card.layout().itemAt(0).widget().text() for card in window.dashboard_calendar_cards]
-    assert any('vencidas' in text for text in captions)
+    assert any('anteriores por confirmar' in text for text in captions)
     assert any('Sin fecha' in text for text in captions)
     window.dashboard_calendar_toggle.click()
     app.processEvents()
@@ -112,7 +112,9 @@ def test_empty_home_has_no_fictitious_charts(synthetic):
     app.processEvents()
     assert not any(value for _, value in window.dashboard_bar_chart.values)
     assert not any(value for _, value in window.dashboard_donut_chart.values)
-    assert window.dashboard_bar_chart.height() == window.dashboard_donut_chart.height() == 110
+    assert window.dashboard_bar_chart.height() == 110
+    assert window.dashboard_donut_chart.body.isHidden()
+    assert not window.dashboard_donut_chart.empty.isHidden()
     assert window.dashboard_movements.count() == 1
     assert 'Todavía no hay movimientos' in window.dashboard_movements.item(0).text()
     assert not window.dashboard_movements_toggle.isVisible()
@@ -131,8 +133,10 @@ def test_paid_obligations_use_empty_distribution(synthetic):
     repo.record_institution_payment(payment_id='bank-paid', instrument_id='card1', paid_at=today, amount_cents=10000)
     before = repo.dashboard_summary()
     window = MainWindow(database=repo.database, test_mode=True)
-    assert window.dashboard_donut_chart.values == [('Mi parte', 0), ('Familiares', 0)]
-    assert window.dashboard_donut_chart.height() == 110
+    assert window.dashboard_donut_chart.values == [(('Mi parte · ' if p['is_owner'] else '') + p['name'], 0)
+        for p in sorted(repo.people_debt_summary(), key=lambda p: not p['is_owner'])]
+    assert window.dashboard_donut_chart.body.isHidden()
+    assert not window.dashboard_donut_chart.empty.isHidden()
     assert repo.dashboard_summary() == before
     window.close()
 

@@ -105,6 +105,8 @@ def test_topup_preview_confirmation_duplicate_and_single_bank_charge(person, mon
     window.resize(820, 520)
     window.show()
     app.processEvents()
+    assert window.dashboard_discount.findChild(QLabel, 'summaryAmount').text() == '••••'
+    window.dashboard_privacy.setChecked(True)
     assert '$0.00 MXN' in window.dashboard_discount.findChild(QLabel, 'summaryAmount').text()
     window.grab().save(str(tmp_path / 'topup-home-small.png'))
     window._show_page(2)

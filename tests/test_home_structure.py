@@ -46,10 +46,11 @@ def test_home_structure_preserves_amounts_actions_and_database(size, tmp_path, m
     amount = lambda widget: widget.findChild(QLabel, 'summaryAmount').text()
     assert amount(window.dashboard_debt) == '$300.00 MXN'
     assert amount(window.dashboard_personal) == amount(window.dashboard_receivables) == '$300.00 MXN'
-    assert amount(window.dashboard_msi) == '$300.00 MXN'
-    assert window.dashboard_donut_chart.values == [('Mi parte', before['personal_pending_cents']), ('Familiares', before['receivables_cents'])]
+    assert amount(window.dashboard_msi) == '$600.00 MXN'
+    # Each person has $300 total across two months, with $150 in this month.
+    assert window.dashboard_donut_chart.values == [('Mi parte · Yo', 15000), ('Familiar sintético', 15000)]
     assert window.dashboard_bar_chart.values[0] == (today.strftime('%Y-%m'), before['scheduled_month_cents'])
-    assert sum(value for _, value in window.dashboard_donut_chart.values) == 60000
+    assert sum(value for _, value in window.dashboard_donut_chart.values) == 30000
     assert window.dashboard_cards.item(0, 5).text() == '$600.00 MXN'
     assert window.dashboard_cards.height() < 90
     assert window.dashboard_people.height() < 115

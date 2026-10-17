@@ -66,5 +66,12 @@
     "guidelines": "https://www.youtube.com/howyoutubeworks/resources/brand-resources/#logos-icons-and-colors",
     "sha256": "5038808acbbc4e6edda16cbeb1cc6dec80e4e4ee4e227e039c41229fa222aa8c",
     "upstream": "https://raw.githubusercontent.com/simple-icons/simple-icons/13.21.0/icons/youtube.svg"
+  },
+  "meliplus": {
+    "title": "Meli+",
+    "hex": "E60073",
+    "source": "https://www.mercadolibre.com.mx/suscripciones/melimas",
+    "upstream": "https://http2.mlstatic.com/resources/frontend/statics/loyal/partners/new_vdp/rebranding/logo_melimas_rebranding@3x.png",
+    "sha256": "891787940f6016c0c3856fe132ae117ee126c63471c4291ff3cba0a0ec69312a"
   }
 }

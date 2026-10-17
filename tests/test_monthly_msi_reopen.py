@@ -40,6 +40,8 @@ def test_manual_msi_persisted_reopened_october_november_december(tmp_path, monke
             def today(cls):
                 return cls(2026, month, 12)
         monkeypatch.setattr(repository_module, 'date', FixedDate)
+        import valenza.gui.app as app_module
+        monkeypatch.setattr(app_module, 'date', FixedDate)
         db = LocalDatabase.open(path, 'synthetic-test-only')
         db.migrate()
         repo = FinanceRepository(db)
@@ -55,6 +57,8 @@ def test_manual_msi_persisted_reopened_october_november_december(tmp_path, monke
         window._show_page(MainWindow.PAGES.index('Tarjetas'))
         assert window.cards_table.item(0,4).text() == '$1,423.98 MXN'
         assert window.cards_table.item(0,5).text() == '$474.66 MXN'
+        assert window.cards_table.isColumnHidden(5)
+        window.cards_columns_toggle.setChecked(True)
         assert not window.cards_table.isColumnHidden(5)
         assert not window.cards_table.isColumnHidden(6)
         from valenza.gui.app import format_money

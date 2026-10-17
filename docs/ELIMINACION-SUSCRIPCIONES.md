@@ -1,0 +1,13 @@
+# Eliminación definitiva de suscripciones
+
+En Suscripciones, seleccionar un servicio y pulsar «Eliminar definitivamente». Disponible también para servicios pausados o cancelados. El diálogo detalla el número de pedidos, cuentas por cobrar y abonos exclusivos que se eliminarán. Antes del borrado exige elegir un archivo nuevo para el respaldo cifrado, que se crea y verifica con la sesión actual. Cancelar cualquiera de los diálogos conserva todos los datos.
+
+Se eliminan la configuración, repartos, vínculos de cargos, pedidos asociados, recargos, cuentas por cobrar, aplicaciones y abonos exclusivos, sugerencias vinculadas e historial de esas entidades. En las revisiones de efectivo guardadas se retiran únicamente sus entradas y marcas, incluso en versiones anteriores; se conservan otros pedidos, parciales, objetivo y dinero propio. No se deja un evento nuevo con el contenido eliminado. No hay cambios de esquema.
+
+Los pagos bancarios globales, las tarjetas y las personas se conservan. El borrado reduce los saldos registrados de los cargos eliminados; no cancela cargos en el banco. Si un abono cubre también otros pedidos, hay devoluciones/recompras o un plan MSI vinculado, se bloquea la operación completa y se explica el motivo. Esos casos requieren una decisión específica sobre sus vínculos: no se deshace ni reasigna dinero automáticamente.
+
+El respaldo cifrado y los archivos de corte exportados conservan la información anterior. Esta opción limpia la base activa: no borra archivos externos ni ofrece borrado forense. Reimportar un archivo anterior puede volver a introducir referencias históricas.
+
+Implementación: `persistence/subscription_delete.py`, `MainWindow._delete_subscription` y acción del panel de Suscripciones. Comparación del estado antes de respaldar y dentro de `BEGIN IMMEDIATE` para detectar cambios concurrentes; cualquier fallo revierte el borrado. Se comprueban claves foráneas antes de confirmar la transacción.
+
+Validación exclusivamente con bases sintéticas cifradas aisladas: regresión de 64 casos aprobada; 12 comprobaciones finales aprobadas (incluyen repeticiones) después de ampliar cobertura. Se verificaron el guardado desde el botón, cancelación, estados activo/pausado/cancelado, respaldo, eliminación de cobros exclusivos, protección de abonos compartidos, conservación de otras suscripciones/conteos y pagos bancarios globales, vista previa obsoleta, fallo de respaldo y reversión completa por fallo de borrado. Evidencia JUnit: `private/codex/auditoria-integral-20261016/subscription-delete.xml` y `subscription-delete-final.xml`. No se accedió a la base real ni a TEST original.

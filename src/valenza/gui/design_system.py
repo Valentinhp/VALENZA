@@ -1,8 +1,8 @@
 """Application-wide Warm Finance controls, including independent popup windows."""
 from pathlib import Path
-from PySide6.QtCore import Qt, QObject, QEvent, QSize, QTranslator, QLibraryInfo, QRectF, QPoint
+from PySide6.QtCore import Qt, QObject, QEvent, QSize, QTranslator, QLibraryInfo, QRectF, QPoint, QRect
 from PySide6.QtGui import QFont, QPalette, QColor, QTextCharFormat, QPainter, QPixmap, QIcon
-from PySide6.QtWidgets import QComboBox, QCalendarWidget, QLineEdit, QProxyStyle, QStyle, QFileDialog, QTableView, QScrollArea
+from PySide6.QtWidgets import QComboBox, QCalendarWidget, QLineEdit, QProxyStyle, QStyle, QFileDialog, QTableView, QScrollArea, QLayout
 
 COLORS = dict(canvas='#f8f4ee', surface='#fffcf8', text='#292724', muted='#706f66',
               border='#ddcfc0', accent='#9b583b', selection='#f0d8c6',
@@ -129,6 +129,69 @@ class WarmStyle(QProxyStyle):
         painter.drawText(QRectF(3, 1, 34, 36), Qt.AlignmentFlag.AlignCenter, symbol)
         painter.end()
         return QIcon(pixmap)
+
+
+class FlowLayout(QLayout):
+    """Keep controls in reading order, wrapping complete controls onto new rows."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(8)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < self.count() else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < self.count() else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QRect(0, 0, width, 0), False)
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect, True)
+
+    def _arrange(self, rect, apply):
+        margins = self.contentsMargins()
+        area = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x, y, row_height = area.x(), area.y(), 0
+        for item in self._items:
+            if item.isEmpty():
+                continue
+            hint = item.sizeHint()
+            width = min(hint.width(), area.width())
+            if x > area.x() and x + width > area.right() + 1:
+                x = area.x()
+                y += row_height + self.spacing()
+                row_height = 0
+            if apply:
+                item.setGeometry(QRect(x, y, width, hint.height()))
+            x += width + self.spacing()
+            row_height = max(row_height, hint.height())
+        return y - rect.y() + row_height + margins.bottom()
 
 
 class WarmScrollArea(QScrollArea):

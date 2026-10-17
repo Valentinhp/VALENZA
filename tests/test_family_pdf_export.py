@@ -26,8 +26,11 @@ def test_inicio_button_exports_current_generator_exact_private_reports(tmp_path)
             text=''.join(page.get_text() for page in doc)
             assert doc.metadata['creator']=='Valenza - PDF familiar 2'
             assert total in text and forbidden not in text
-            assert all(term.casefold() not in text.casefold() for term in
-                       ('Wallet','Descuento','Banco','Compensación','Recompra','Cambio por devolución'))
+            if name == 'mama-sintetico.pdf':
+                assert all(term.casefold() not in text.casefold() for term in
+                           ('Wallet','Descuento','Banco','Compensación','Recompra','Cambio por devolución'))
+            else:
+                assert 'Descuentos personales' in text and 'Resultado personal previsto' in text
             for page in doc:
                 for x0,y0,x1,y1,*_ in page.get_text('blocks'):
                     assert 30<=x0<x1<=582 and 20<=y0<y1<=782

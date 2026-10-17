@@ -1,5 +1,8 @@
 # Inicio · Ver desglose por persona
 
+La mejora de indicadores visibles y PDF exclusivo del propietario se documenta
+en [Resultado personal previsto](RESULTADO_PERSONAL_PREVISTO.md).
+
 El panel de texto «Estado de cuenta» de Inicio se reemplazó por un acordeón
 Warm Finance. «Ver desglose» permanece en su ubicación: abre una lista compacta
 con nombre y saldo pendiente. Cada persona despliega sus pedidos con fecha,

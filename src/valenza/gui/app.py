@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDateEdit,
     QFormLayout,
     QFileDialog,
     QFrame,
@@ -40,14 +41,23 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt, Signal, QSignalBlocker, QRegularExpression, QEvent, QSize
-from PySide6.QtGui import QRegularExpressionValidator, QPixmap, QIcon, QColor, QFont, QFontMetrics
+from valenza.gui.cards_layout import CardExplanation
+from PySide6.QtCore import Qt, Signal, QSignalBlocker, QRegularExpression, QEvent, QSize, QDate
+from PySide6.QtGui import QRegularExpressionValidator, QPixmap, QIcon, QColor, QFont, QFontMetrics, QShortcut, QKeySequence
 from valenza.gui.warm_finance import (FinanceChart, HOME_STYLE, line_icon, MovementDelegate,
-                                    apply_warm_surface, warm_section, FinancialSummary, financial_text_html)
+                                    apply_warm_surface, warm_section, FinancialSummary, financial_text_html,
+                                    date_label, period_label, RecordedDateDelegate)
 from valenza.gui.unlock import UnlockDialog
-from valenza.gui.design_system import install_design_system
+from valenza.gui.errors import user_error
+from valenza.gui.design_system import install_design_system, FlowLayout, WarmScrollArea
 from valenza.gui.branding import brand_icon, PaymentIdentity
 from valenza.gui.home_people_breakdown import HomePeopleBreakdown
+from valenza.gui.people_month_chart import PeopleMonthChart
+from valenza.gui.search import SearchDialog
+from valenza.gui.personal_result import personal_result, result_label, EXPLANATION
+from valenza.gui.home_month_summary import home_month_summary, home_month_text
+from valenza.gui.bank_reconciliation import (difference_text, query_text, reported_text, breakdown_html,
+    forecast_text, forecast_notice, scheduled_text, official_period_query, official_text, monthly_comparison_text, BALANCE_TYPES)
 
 from valenza.persistence.database import DATABASE_ERRORS, DatabaseSecurityError, LocalDatabase, SCHEMA_VERSION
 from valenza.persistence.repository import FinanceRepository
@@ -193,7 +203,10 @@ class MainWindow(QMainWindow):
         navigation = QListWidget()
         self.navigation = navigation
         navigation.setObjectName("navigation")
-        navigation.setFixedWidth(150)
+        navigation.setFixedWidth(164)
+        navigation.setAccessibleName('Secciones de Valenza')
+        navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        navigation.setTextElideMode(Qt.TextElideMode.ElideNone)
         navigation.addItems(self.PAGES)
         for index, icon in enumerate(('home', 'people', 'receipt', 'card', 'card', 'calendar', 'settings')):
             navigation.item(index).setIcon(line_icon(icon))
@@ -215,9 +228,17 @@ class MainWindow(QMainWindow):
         else:
             subtitle.deleteLater()
         self.setWindowIcon(QIcon(str(Path(__file__).parent / 'assets' / 'icono_app_claro.png')))
+        self.search_button = QPushButton('Buscar · Ctrl+K')
+        self.search_button.setObjectName('globalSearchButton')
+        self.search_button.setAccessibleName('Buscar en Valenza, Control K')
+        self.search_button.setEnabled(self.repository is not None)
+        self.search_button.clicked.connect(self._open_search)
+        sidebar_layout.addWidget(self.search_button)
         sidebar_layout.addWidget(navigation, 1)
         navigation.setStyleSheet('QListWidget { background: #f6f0e7; border: none; border-radius: 10px; padding: 6px; } QListWidget::item { padding: 10px 3px; border-radius: 7px; color: #535b5d; } QListWidget::item:selected { background: #f0d5bc; color: #844625; }')
+        navigation.setStyleSheet(navigation.styleSheet() + ' QListWidget:focus { border: 2px solid #9b583b; padding: 4px; } QListWidget::item:focus { border: 1px solid #9b583b; }')
         navigation.currentRowChanged.connect(self._show_page)
+        QWidget.setTabOrder(self.search_button, navigation)
         content_row = 1 if self.test_mode else 0
         layout.addWidget(sidebar, content_row, 0)
 
@@ -234,12 +255,35 @@ class MainWindow(QMainWindow):
             self.pages.addWidget(self._make_page(page_name))
         self.pages.addWidget(self._legacy_purchases_page)
         layout.addWidget(self.pages, content_row, 1)
+        self.action_feedback = QLabel()
+        self.action_feedback.setObjectName('savedActionFeedback')
+        self.action_feedback.setWordWrap(True)
+        self.action_feedback.setTextFormat(Qt.TextFormat.PlainText)
+        self.action_feedback.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.action_feedback.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.action_feedback.hide()
+        layout.addWidget(self.action_feedback, content_row + 1, 1)
         navigation.setCurrentRow(0)
         self.setCentralWidget(root)
+        self._search_dialog = None
+        self.search_shortcut = QShortcut(QKeySequence('Ctrl+K'), self)
+        self.search_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.search_shortcut.activated.connect(self._open_search)
         for combo in self.findChildren(QComboBox):
-            combo.setMinimumContentsLength(10)
+            if combo not in (self.bank_query_type, self.bank_scope):
+                combo.setMinimumContentsLength(10)
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         if self.repository is not None:
+            for name, columns in (
+                ('cards_table', (9, 10, 14)), ('card_payment_history', (0,)),
+                ('collection_history', (0,)), ('collection_items', (9,)),
+                ('orders_table', (1,)), ('subscription_table', (1,)),
+                ('bank_history', (0,)), ('dashboard_cards', (3,)),
+            ):
+                table = getattr(self, name)
+                delegate = RecordedDateDelegate(table)
+                for column in columns:
+                    table.setItemDelegateForColumn(column, delegate)
             for table in (self.cards_table, self.card_payment_history, self.collection_items,
                           self.collection_history, self.orders_table, self.people_table,
                           self.owner_people_table):
@@ -248,12 +292,19 @@ class MainWindow(QMainWindow):
                 table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
                 table.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
                 table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
-            for table, column in ((self.cards_table, 0), (self.collection_items, 2), (self.orders_table, 0)):
-                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+            for table, column in ((self.cards_table, 0), (self.collection_items, 2)):
+                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
                 table.horizontalHeader().setMinimumSectionSize(75)
+            for table, name in ((self.orders_table, 'Pedidos: usa las flechas para consultar y Tab para ir a las acciones'),
+                                (self.collection_items, 'Deudas por persona'), (self.collection_history, 'Historial de abonos'),
+                                (self.cards_table, 'Tarjetas y cuentas'), (self.card_payment_history, 'Pagos bancarios registrados'),
+                                (self.people_table, 'Personas registradas'), (self.subscription_table, 'Suscripciones registradas')):
+                table.setAccessibleName(name)
+                table.setTabKeyNavigation(False)
             self.cards_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
             self.cards_table.setColumnWidth(1, 150)
-            self.cards_table.horizontalHeaderItem(4).setText('Deuda total (incluye futuras)')
+            self.cards_table.horizontalHeaderItem(3).setText('Pagado al banco')
+            self.cards_table.horizontalHeaderItem(4).setText('Deuda total pendiente')
             for table, columns in ((self.collection_items, (3, 4, 5)), (self.cards_table, (2, 3, 4))):
                 delegate = CompactMoneyDelegate(table)
                 for column in columns:
@@ -265,7 +316,7 @@ class MainWindow(QMainWindow):
             self.collection_items.setToolTip('Selecciona una cuenta: origen, fecha y tipo se muestran en su detalle.')
             self.cards_columns_toggle = QPushButton('Ver todas las columnas de tarjetas')
             self.cards_columns_toggle.setCheckable(True)
-            self.cards_columns_toggle.toggled.connect(lambda visible: [self.cards_table.setColumnHidden(c, not visible) for c in list(range(7, 12)) + [13, 14, 15]])
+            self.cards_columns_toggle.toggled.connect(lambda visible: [self.cards_table.setColumnHidden(c, not visible) for c in list(range(5, 12)) + [13, 14, 15]])
             self.cards_summary_layout.insertWidget(1, self.cards_columns_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
             self.cards_columns_toggle.toggled.emit(False)
             self.card_apply_payment.currentIndexChanged.connect(self._update_action_states)
@@ -325,8 +376,7 @@ class MainWindow(QMainWindow):
         message.setWordWrap(True)
         layout.addWidget(message)
         if page_name == "Configuración":
-            security = QLabel("Persistencia real: protegida por SQLCipher; "
-                              "modo demostración: solo datos sintéticos.")
+            security = QLabel("Datos protegidos con cifrado local. La demostración usa datos ficticios.")
             security.setObjectName("securityNotice")
             layout.addWidget(security)
         layout.addStretch()
@@ -341,7 +391,11 @@ class MainWindow(QMainWindow):
     def _read_mxn(self, field):
         return self._parse_mxn_to_cents(field.text())
 
-    def _financial_dialog(self, title):
+    def _financial_dialog(self, title, *, save_text='Guardar cambios', cancel_text='Cancelar'):
+        self.statusBar().clearMessage()
+        if hasattr(self,'action_feedback'):
+            self.action_feedback.clear()
+            self.action_feedback.hide()
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
         dialog.resize(600, 440)
@@ -355,8 +409,9 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll, 1)
         footer = QHBoxLayout()
         footer.addStretch()
-        cancel = QPushButton('Cancelar')
-        save = QPushButton('Guardar')
+        cancel = QPushButton(cancel_text)
+        save = QPushButton(save_text)
+        dialog.cancel_button, dialog.save_button = cancel, save
         cancel.clicked.connect(dialog.reject)
         footer.addWidget(cancel)
         footer.addWidget(save)
@@ -372,7 +427,7 @@ class MainWindow(QMainWindow):
         create = QPushButton('Nueva suscripción'); create.setObjectName('primaryAction')
         create.clicked.connect(lambda: self._edit_subscription())
         header.addWidget(create); layout.addLayout(header)
-        notice = QLabel('Los próximos cobros son previstos. Registrar un cargo real crea un solo Pedido; vincular uno existente no lo repite.')
+        notice = QLabel('Próximos cobros estimados. Registra solo cargos reales; vincula los pedidos que ya existen.')
         notice.setWordWrap(True)
         layout.addWidget(notice)
         self.subscription_summary = QLabel(); self.subscription_summary.setWordWrap(True)
@@ -391,9 +446,10 @@ class MainWindow(QMainWindow):
         for index, (text, callback) in enumerate((('Editar',lambda:self._edit_subscription(self._table_id(self.subscription_table,5))),
                 ('Pausar / reactivar',lambda:self._subscription_status(False)),
                 ('Cancelar suscripción',lambda:self._subscription_status(True)),
-                ('Registrar o vincular cargo real',self._subscription_charge_dialog))):
+                ('Registrar o vincular cargo real',self._subscription_charge_dialog),
+                ('Eliminar definitivamente',self._delete_subscription))):
             button = QPushButton(text)
-            if index == 2: button.setObjectName('dangerAction')
+            if index in (2,4): button.setObjectName('dangerAction')
             button.clicked.connect(callback)
             actions.addWidget(button,index//2,index%2, alignment=Qt.AlignmentFlag.AlignLeft)
             self.subscription_actions.append(button)
@@ -403,7 +459,7 @@ class MainWindow(QMainWindow):
         self.subscription_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.subscription_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.subscription_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.subscription_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch)
+        self.subscription_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents)
         self.subscription_table.setMaximumHeight(260)
         self.subscription_table.setAlternatingRowColors(True)
         self.subscription_table.setIconSize(QSize(24, 24))
@@ -431,7 +487,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _admin_scroll(content):
-        scroll = QScrollArea()
+        scroll = WarmScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(content)
@@ -443,7 +499,7 @@ class MainWindow(QMainWindow):
         active = [s for s in subscriptions if s['status'] == 'ACTIVE']
         family = sum(a['amount_cents'] + a['surcharge_cents'] for s in active for a in s['allocations'] if not a['is_owner'])
         next_due = min((s['next_due'] for s in active), default='Sin cargos previstos')
-        self.subscription_summary.setText(f"Gasto previsto: {format_money(sum(s['amount_cents'] for s in active))} · Activas: {len(active)}\nPróximo cargo previsto: {next_due} · Familia prevista (incluye recargos): {format_money(family)}")
+        self.subscription_summary.setText(f"Gasto previsto: {format_money(sum(s['amount_cents'] for s in active))} · Activas: {len(active)}\nPróximo cargo previsto: {date_label(next_due)} · Familia prevista (incluye recargos): {format_money(family)}")
         self.subscription_empty.setVisible(not subscriptions)
         self.subscription_empty_card.setVisible(not subscriptions)
         self.subscription_table.setVisible(bool(subscriptions))
@@ -473,7 +529,7 @@ class MainWindow(QMainWindow):
         identity = self._table_id(self.subscription_table,5)
         subscription = next((s for s in self.repository.list_subscriptions() if s['id']==identity),None)
         for index, button in enumerate(self.subscription_actions):
-            button.setEnabled(bool(subscription and subscription['status'] != 'CANCELLED' and (index != 3 or subscription['status'] == 'ACTIVE')))
+            button.setEnabled(bool(subscription and (index==4 or subscription['status'] != 'CANCELLED' and (index != 3 or subscription['status'] == 'ACTIVE'))))
         self.subscription_actions[1].setText('Reactivar' if subscription and subscription['status']=='PAUSED' else 'Pausar')
         self.subscription_payment_identity.set_instrument(self._brand_instrument(subscription["instrument_id"]) if subscription else None)
         self.subscription_brand.setVisible(bool(subscription))
@@ -481,11 +537,11 @@ class MainWindow(QMainWindow):
             self.subscription_brand.setPixmap(brand_icon(subscription["name"]).pixmap(32, 32))
             self.subscription_brand.setToolTip(subscription["name"])
         if not subscription:
-            self.subscription_detail.setText('Selecciona un servicio para consultar su calendario y responsables. Los cambios afectan ciclos futuros.')
+            self.subscription_detail.setText('Selecciona un servicio para consultar su calendario, reparto y cargos registrados. Al editar puedes elegir si también reduces recargos anteriores; revisa la vista previa antes de guardar.')
             return
         state = {'ACTIVE':'Activa','PAUSED':'Pausada','CANCELLED':'Cancelada'}[subscription['status']]
         shares = '\n'.join(f"{a['name']}: {format_money(a['amount_cents'])}" + (f" + recargo {format_money(a['surcharge_cents'])}" if a['surcharge_cents'] else '') for a in subscription['allocations'])
-        self.subscription_detail.setText(f"{subscription['name']} · {state} · {subscription['alias']}\nMensual: {format_money(subscription['amount_cents'])} · Próximo previsto: {subscription['next_due']} · Día del ciclo: {subscription['billing_day']}\n{shares}\nFamilia pendiente de cargos ya registrados: {format_money(subscription['family_pending_cents'])}")
+        self.subscription_detail.setText(f"{subscription['name']} · {state} · {subscription['alias']}\nMensual: {format_money(subscription['amount_cents'])} · Próximo previsto: {date_label(subscription['next_due'])} · Día del ciclo: {subscription['billing_day']}\n{shares}\nFamilia pendiente de cargos ya registrados: {format_money(subscription['family_pending_cents'])}")
         self.subscription_detail.setMinimumHeight(self.subscription_detail.fontMetrics().lineSpacing() * (len(self.subscription_detail.text().splitlines()) + 1))
 
     def _edit_subscription(self, identity=None):
@@ -494,7 +550,9 @@ class MainWindow(QMainWindow):
             return
         if existing and existing['status']=='CANCELLED':
             self._show_error('Una suscripción cancelada conserva su historial y no se edita.'); return
-        dialog,body,save = self._financial_dialog('Editar suscripción' if existing else 'Nueva suscripción mensual')
+        dialog,body,save = self._financial_dialog('Editar suscripción' if existing else 'Nueva suscripción mensual',
+            save_text='Guardar suscripción' if existing else 'Crear suscripción',
+            cancel_text='Descartar cambios' if existing else 'Cancelar')
         apply_warm_surface(dialog, 'warmSubscriptionDialog')
         dialog.resize(660, 590)
         body.parentWidget().setObjectName('warmSubscriptionDialogContent')
@@ -504,6 +562,7 @@ class MainWindow(QMainWindow):
         save.setObjectName('primaryAction')
         form = QFormLayout()
         name = QLineEdit(existing['name'] if existing else '')
+        name.setAccessibleName('Nombre del servicio, obligatorio')
         service_identity = QLabel()
         service_identity.setFixedSize(32, 32)
         service_identity.setAccessibleName('Identidad del servicio')
@@ -525,9 +584,15 @@ class MainWindow(QMainWindow):
             if card['active'] or existing and card['id']==existing['instrument_id']:
                 instrument.addItem(brand_icon(card['institution_name'], 'institution'), f"{card['alias']} · {card['institution_name']}", card['id'])
         if existing: instrument.setCurrentIndex(instrument.findData(existing['instrument_id']))
-        for label,field in (('Servicio',service_name_row),('Importe mensual MXN',amount),('Próximo cobro AAAA-MM-DD',due),('Cuenta / tarjeta',instrument)):
+        for label,field in (('Servicio *',service_name_row),('Importe mensual MXN *',amount),('Próximo cobro previsto *',due),('Cuenta / tarjeta *',instrument)):
             form.addRow(label,field)
+        due.setPlaceholderText('AAAA-MM-DD')
+        due.setAccessibleName('Fecha del próximo cobro previsto, AAAA-MM-DD')
+        amount.setAccessibleName('Importe mensual de la suscripción en MXN')
+        instrument.setAccessibleName('Cuenta de la suscripción')
         service_body.addLayout(form)
+        required = QLabel('* Campos obligatorios · Fechas en formato AAAA-MM-DD.')
+        required.setObjectName('secondaryText'); required.setWordWrap(True); service_body.addWidget(required)
         reparto, reparto_body = warm_section('Reparto mensual · importes en MXN'); body.addWidget(reparto)
         explanation = QLabel('Las participaciones deben sumar el importe mensual. Los recargos familiares no aumentan el cargo bancario.')
         explanation.setWordWrap(True); reparto_body.addWidget(explanation)
@@ -543,6 +608,8 @@ class MainWindow(QMainWindow):
             allocation = previous.get(person['id'],{})
             value = self._money_input(allocation.get('amount_cents',0))
             fee = self._money_input(allocation.get('surcharge_cents',0))
+            value.setAccessibleName('Parte mensual de ' + person['name'] + ', en MXN')
+            fee.setAccessibleName('Recargo familiar de ' + person['name'] + ', en MXN')
             fee.setEnabled(fees.isChecked() and not person['is_owner'])
             fee.setToolTip('Recargo familiar; no aumenta el cargo bancario.')
             if not person['active']:
@@ -553,31 +620,95 @@ class MainWindow(QMainWindow):
             fields.append((person,value,fee))
         fees.toggled.connect(lambda checked:[fee.setEnabled(checked and not p['is_owner']) for p,value,fee in fields])
         reparto_body.addLayout(shares)
+        posted_fees=QCheckBox('Quitar o reducir también los recargos de cargos ya registrados')
+        posted_fees.setChecked(bool(existing));posted_fees.setVisible(bool(existing))
+        posted_fees.setObjectName('updatePostedSubscriptionFees')
+        body.addWidget(posted_fees)
+        fee_preview=CardExplanation();fee_preview.setObjectName('postedSubscriptionFeePreview')
+        fee_preview.setVisible(bool(existing));body.addWidget(fee_preview)
         error = QLabel(); error.setWordWrap(True); body.addWidget(error)
+        surcharge_state={'token':None}
+        def update_fee_preview(*_):
+            if not existing:return
+            if not posted_fees.isChecked():
+                fee_preview.setText('Solo cambia la configuración futura. Los cargos y el recuento anteriores se conservan.')
+                surcharge_state['token']=None;save.setEnabled(True);return
+            try:
+                from valenza.persistence.subscription_fees import preview
+                amounts={p['id']:self._read_mxn(f) if fees.isChecked() and not p['is_owner'] else 0 for p,v,f in fields}
+                plan=preview(self.repository,identity,amounts);surcharge_state['token']=plan['token']
+                changes=plan['changes'];blocked=[c for c in changes if c['blocked']]
+                total=sum(-c['delta_cents'] for c in changes)
+                details=[c['name']+' · '+c['cycle_date']+': '+format_money(c['old_fee'])+' → '+format_money(c['new_fee']) for c in changes]
+                text=(f"{len(changes)} recargos anteriores por reducir: {format_money(total)}. "
+                    'Se ajusta la deuda familiar, sin cambiar el cargo bancario ni los abonos.\n'
+                    'En el recuento se ajustan las marcas completas; los parciales se conservan.') if changes else 'No hay recargos anteriores que reducir.'
+                if details:text+='\n'+'\n'.join(details[:3])+(' · Más detalles al pasar el cursor.' if len(details)>3 else '')
+                if blocked:text+='\nNo se aplicará: '+blocked[0]['name']+' · '+blocked[0]['blocked']
+                fee_preview.setText(text);fee_preview.setToolTip('\n'.join(details));save.setEnabled(not blocked)
+            except ValueError:
+                fee_preview.setText('Completa los recargos para revisar los cargos anteriores.');save.setEnabled(False)
+        posted_fees.toggled.connect(update_fee_preview);fees.toggled.connect(update_fee_preview)
+        for p,v,f in fields:f.textChanged.connect(update_fee_preview)
+        update_fee_preview()
         def persist():
             save.setEnabled(False)
             try:
                 self.repository.save_subscription(subscription_id=identity or str(uuid4()),name=name.text(),
                     amount_cents=self._read_mxn(amount),instrument_id=instrument.currentData(),next_due=due.text(),
                     allocations=[dict(user_id=p['id'],amount_cents=self._read_mxn(v),surcharge_cents=self._read_mxn(f) if fees.isChecked() and not p['is_owner'] else 0) for p,v,f in fields],
-                    expected_revision=existing['revision'] if existing else None)
+                    expected_revision=existing['revision'] if existing else None,
+                    reduce_posted_surcharges=bool(existing and posted_fees.isChecked()),
+                    expected_surcharge_state=surcharge_state['token'] if existing and posted_fees.isChecked() else None)
             except (ValueError,*DATABASE_ERRORS) as exc:
                 error.setText(self._safe_error(exc)); save.setEnabled(True); return
             dialog.accept(); self.data_changed.emit('subscriptions')
+            self._show_saved_information('Suscripción actualizada.' if existing else 'Suscripción creada.', 'Suscripciones: '+name.text().strip()+' · selecciona el servicio para consultar sus datos.')
         save.clicked.connect(persist)
         dialog.exec()
+
+    def _delete_subscription(self):
+        from valenza.persistence.subscription_delete import preview,delete
+        identity=self._table_id(self.subscription_table,5)
+        if not identity:return
+        try:
+            plan=preview(self.repository,identity)
+            if plan['blocked']:
+                self._show_error('\n'.join(plan['blocked']));return
+            text=(f"Eliminar definitivamente «{plan['subscription']['name']}»: "
+                f"{len(plan['orders'])} pedidos/cargos, {len(plan['accounts'])} cuentas por cobrar "
+                f"y {len(plan['payments'])} abonos exclusivos.\n\n"
+                'Se quitarán sus recargos, historial y referencias en los recuentos guardados. '
+                'Esto reduce la deuda registrada; no cancela cargos en el banco. '
+                'Los pagos bancarios globales se conservan.\n\n'
+                'Se requiere un respaldo cifrado. El respaldo y los archivos de cortes exportados '
+                'conservarán la información anterior. ¿Continuar?')
+            if QMessageBox.warning(self,'Eliminar definitivamente',text,
+                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+            path,_=QFileDialog.getSaveFileName(self,'Guardar respaldo cifrado antes de eliminar',
+                'Valenza-antes-de-eliminar-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.db','Base cifrada (*.db)')
+            if not path:return
+            delete(self.repository,identity,expected_token=plan['token'],backup_path=path)
+        except (ValueError,OSError,DatabaseSecurityError,*DATABASE_ERRORS) as exc:
+            self._show_error(self._safe_error(exc));return
+        self.data_changed.emit('subscriptions')
+        self._show_information('Suscripción, cargos y deudas vinculados eliminados. Respaldo cifrado: '+path)
 
     def _subscription_status(self, cancel):
         identity = self._table_id(self.subscription_table,5)
         existing = next((s for s in self.repository.list_subscriptions() if s['id']==identity),None)
         if not existing: return
-        if cancel and QMessageBox.question(self,'Cancelar suscripción','¿Cancelar futuros cobros? Los pedidos y pendientes existentes se conservan.',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:
+        if cancel and QMessageBox.question(self,'Cancelar previsión en Valenza','¿Cancelar la previsión de esta suscripción en Valenza?\nEsto NO cancela el servicio ni los cobros del proveedor. Debes gestionarlo con el proveedor.\nLos pedidos y pendientes existentes se conservan.',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:
             return
         try:
             self.repository.set_subscription_status(identity,'CANCELLED' if cancel else 'PAUSED' if existing['status']=='ACTIVE' else 'ACTIVE')
         except (ValueError,*DATABASE_ERRORS) as exc:
             self._show_error(self._safe_error(exc)); return
         self.data_changed.emit('subscriptions')
+
+        self._show_information('Previsión cancelada en Valenza; se conserva su historial. El servicio con el proveedor no se canceló.' if cancel else
+            'Suscripción pausada.' if existing['status']=='ACTIVE' else 'Suscripción reactivada.')
 
     def _subscription_charge_dialog(self):
         identity = self._table_id(self.subscription_table,5)
@@ -609,6 +740,7 @@ class MainWindow(QMainWindow):
             except (ValueError,*DATABASE_ERRORS) as exc:
                 error.setText(self._safe_error(exc)); save.setEnabled(True); return
             dialog.accept(); self.data_changed.emit('subscriptions')
+            self._show_information('Cargo real registrado.' if choices.currentData() is None else 'Pedido vinculado a la suscripción.')
         save.clicked.connect(persist); dialog.exec()
 
     def _make_cards_page(self) -> QWidget:
@@ -616,7 +748,7 @@ class MainWindow(QMainWindow):
         apply_warm_surface(page, 'warmCards')
         outer = QVBoxLayout(page)
         outer.setContentsMargins(12, 10, 12, 10)
-        scroll = QScrollArea()
+        scroll = WarmScrollArea()
         self.cards_scroll = scroll
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
@@ -640,11 +772,11 @@ class MainWindow(QMainWindow):
 
         self.card_panels = {}
         self.card_summary_cards = [self._make_card(label, '—') for label in
-            ('Deuda total seleccionada', 'MSI del mes', 'MSI de meses futuros')]
-        indicators = QHBoxLayout()
-        for card in self.card_summary_cards:
-            indicators.addWidget(card)
-        outer.addLayout(indicators)
+            ('Deuda total seleccionada', 'Correspondiente al mes · previsto', 'Meses futuros · previstos')]
+        self.card_indicators = QGridLayout()
+        for index, card in enumerate(self.card_summary_cards):
+            self.card_indicators.addWidget(card, 0, index)
+        layout.addLayout(self.card_indicators)
         summary_frame, self.cards_summary_layout = warm_section('Tarjetas y cuentas')
         layout.addWidget(summary_frame)
         self.cards_table = QTableWidget(0, 16)
@@ -652,8 +784,8 @@ class MainWindow(QMainWindow):
         self.cards_table.setObjectName("cardsTable")
         self.cards_table.setHorizontalHeaderLabels(
             ["Tarjeta", "Institución", "Cargado", "Pagado", "Por liquidar",
-             "Cuotas MSI previstas este mes", "Cuotas MSI de meses futuros", "Corte", "Límite", "Próximo corte",
-             "Vencimiento", "Estado", "ID", "Banco (deuda total)", "Consultado", "Banco − Valenza"]
+             "Programado en el periodo", "Meses futuros previstos", "Corte", "Límite", "Próximo corte",
+             "Vencimiento", "Estado", "ID", "Último saldo banco", "Consultado", "Diferencia histórica"]
         )
         self.cards_table.setColumnHidden(12, True)
         self.cards_table.setMinimumHeight(0)
@@ -667,28 +799,142 @@ class MainWindow(QMainWindow):
         self.cards_empty_notice = QLabel('No hay tarjetas registradas. Abre Administración bancaria para agregar una cuenta.')
         self.cards_empty_notice.setWordWrap(True)
         self.cards_summary_layout.addWidget(self.cards_empty_notice)
-        bank_body = self._cards_panel(layout, 'bank', 'Consulta bancaria', 'Saldo informado por el banco; consultar no registra pagos.')
-        self.bank_query_comparison = QLabel('Saldo bancario: Sin consultar')
+        bank_body = self._cards_panel(layout, 'bank', 'Comparar con mi banco', 'Guardar conserva una referencia; no registra pagos ni cambia tu deuda.')
+        bank_body.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.card_panels['bank'][1].setSizePolicy(QSizePolicy.Policy.Preferred,QSizePolicy.Policy.Minimum)
+        bank_panel=self.card_panels['bank'][1].parentWidget()
+        bank_panel.setSizePolicy(QSizePolicy.Policy.Preferred,QSizePolicy.Policy.Minimum)
+        bank_panel.layout().setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.bank_query_comparison = CardExplanation('Saldo bancario: Sin consultar')
         self.bank_query_comparison.setWordWrap(True)
         bank_body.addWidget(self.bank_query_comparison)
-        bank_form = QGridLayout()
-        bank_note = QLabel('Consulta de deuda total de la tarjeta seleccionada. No es pago mínimo ni pago para no generar intereses; no crea movimientos.')
+        self.bank_nu_help = CardExplanation('Nu: «saldo actual» y «saldo a pagar» no equivalen a deuda total con MSI futuros. '
+            'Confirma con Nu el total de la misma cuenta, con cargos y pagos ya reflejados. '
+            'Para saber cuánto pagar, copia «Pago para no generar intereses» con sus fechas.')
+        self.bank_nu_help.setToolTip('Si el alcance no está confirmado, guarda sin comparación. '
+            'No uses pago mínimo, crédito disponible ni saldo futuro como deuda total o pago para no generar intereses.')
+        self.bank_nu_help.setWordWrap(True)
+        bank_body.addWidget(self.bank_nu_help)
+        bank_form = self._cards_compact_form()
+        self.bank_period_picker = self._make_period_picker()
+        bank_form.addRow(QLabel('Periodo de vencimiento'), self.bank_period_picker)
+        bank_note = CardExplanation('Elige el mismo periodo que muestra tu banco. El calendario de Valenza es una previsión, no un estado de cuenta confirmado.')
         bank_note.setWordWrap(True)
-        bank_form.addWidget(bank_note, 0, 0, 1, 2)
+        bank_form.addRow(bank_note)
         self.bank_query_amount = MxnLineEdit()
-        self.bank_query_amount.setPlaceholderText('Deuda total informada por el banco')
-        self.bank_query_date = QLineEdit(date.today().isoformat())
-        self.bank_query_save = QPushButton('Guardar consulta')
+        self.bank_query_amount.setAccessibleName('Importe del banco, en MXN')
+        self.bank_query_amount.setPlaceholderText('Importe que muestra tu banco (MXN)')
+        self.bank_query_date = QLineEdit(datetime.now().astimezone().isoformat(timespec='seconds'))
+        self.bank_query_date.setAccessibleName('Fecha y hora de consulta')
+        self.bank_query_type = QComboBox()
+        for key in ('NO_INTEREST', 'MINIMUM', 'OTHER', 'TOTAL', 'STATEMENT', 'MONTHLY', 'PENDING', 'UNKNOWN'):
+            label = 'Deuda total · incluye MSI futuros' if key == 'TOTAL' else BALANCE_TYPES[key]
+            self.bank_query_type.addItem(label,key)
+        self.bank_query_type.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.bank_query_type.setMinimumContentsLength(32)
+        self.bank_query_type.setAccessibleName('Concepto del saldo informado por el banco')
+        self.bank_query_type.setToolTip('Deuda total es la comparación secundaria: incluye todas las cuotas futuras.')
+        self.bank_query_label = QLineEdit()
+        self.bank_query_label.setPlaceholderText('Nombre del otro saldo, tal como aparece en el banco')
+        self.bank_query_label.setAccessibleName('Nombre del otro saldo bancario')
+        self.bank_query_label.setMaxLength(120)
+        self.bank_query_label.hide()
+        self.bank_scope = QComboBox()
+        self.bank_scope.setAccessibleName('Cuenta o línea compartida')
+        self.bank_scope.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.bank_scope.setMinimumContentsLength(32)
+        self.bank_scope_save = QPushButton('Guardar vínculo informativo')
+        self.bank_scope_save.clicked.connect(self._record_bank_scope)
+        self.bank_query_save = QPushButton('Guardar comparación')
         self.bank_query_save.setEnabled(False)
         self.bank_query_save.clicked.connect(self._record_bank_query)
         self.bank_query_save.setToolTip('Selecciona una tarjeta o línea de crédito. Esta consulta no registra movimientos.')
-        bank_form.addWidget(QLabel('Saldo adeudado (MXN)'), 1, 0)
-        bank_form.addWidget(self.bank_query_amount, 1, 1)
-        bank_form.addWidget(QLabel('Consultado el (AAAA-MM-DD)'), 2, 0)
-        bank_form.addWidget(self.bank_query_date, 2, 1)
-        bank_form.addWidget(self.bank_query_save, 3, 1)
-        bank_body.addLayout(bank_form)
+        question = QLabel('Importe del banco')
+        question.setToolTip('¿Cuánto muestra tu banco para ese mismo periodo?')
+        question.setBuddy(self.bank_query_amount)
+        bank_form.addRow(QLabel('Tipo de saldo'), self.bank_query_type)
+        bank_form.addRow(self.bank_query_label)
+        bank_form.addRow(question, self.bank_query_amount)
+        self.bank_total_confirmed = QCheckBox('Confirmo deuda total con MSI futuros')
+        self.bank_total_confirmed.setToolTip('Misma cuenta y momento. No marques si copiaste saldo actual, al corte, a pagar, disponible o con movimientos pendientes.')
+        self.bank_total_confirmed.toggled.connect(self._preview_bank_query)
+        bank_form.addRow(self.bank_total_confirmed)
+        self.bank_closing_date = QLineEdit()
+        self.bank_due_date = QLineEdit()
+        for field, label in ((self.bank_closing_date, 'Fecha de corte'), (self.bank_due_date, 'Fecha límite de pago')):
+            field.setPlaceholderText('AAAA-MM-DD · copiar del banco')
+            field.setAccessibleName(label)
+        self.bank_closing_label = QLabel('Fecha de corte')
+        self.bank_due_label = QLabel('Fecha límite de pago')
+        self.bank_closing_label.setBuddy(self.bank_closing_date)
+        self.bank_due_label.setBuddy(self.bank_due_date)
+        bank_form.addRow(self.bank_closing_label, self.bank_closing_date)
+        bank_form.addRow(self.bank_due_label, self.bank_due_date)
+        advanced_form = self._cards_compact_form()
+        self.bank_date_manual = QCheckBox('Usar otra fecha y hora')
+        advanced_form.addRow(self.bank_date_manual)
+        self.bank_query_date.setEnabled(False)
+        self.bank_date_manual.toggled.connect(self.bank_query_date.setEnabled)
+        advanced_form.addRow(QLabel('Fecha y hora de consulta'), self.bank_query_date)
+        bank_form.addRow(self.bank_query_save)
+        scope_form=self._cards_compact_form()
+        scope_form.addRow(QLabel('Cuenta / línea compartida'), self.bank_scope)
+        scope_form.addRow(self.bank_scope_save)
+        scope_note=CardExplanation('Vincula solo tarjetas de la misma línea con movimientos distintos. El vínculo no mueve cargos ni pagos.')
+        scope_note.setWordWrap(True)
+        scope_form.addRow(scope_note)
+        for button in (self.bank_query_save, self.bank_scope_save):
+            button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.bank_form_widget = QWidget()
+        self.bank_form_widget.setLayout(bank_form)
+        self.bank_form_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        bank_body.addWidget(self.bank_form_widget)
+        self.bank_query_feedback = CardExplanation()
+        self.bank_query_feedback.setWordWrap(True)
+        bank_body.addWidget(self.bank_query_feedback)
+        self.bank_query_amount.textChanged.connect(self._preview_bank_query)
+        self.bank_query_type.currentIndexChanged.connect(self._preview_bank_query)
+        self.bank_query_date.textChanged.connect(self._preview_bank_query)
+        self.bank_date_manual.toggled.connect(self._preview_bank_query)
+        QWidget.setTabOrder(self.bank_period_picker, self.bank_query_type)
+        QWidget.setTabOrder(self.bank_query_type, self.bank_query_label)
+        QWidget.setTabOrder(self.bank_query_label, self.bank_query_amount)
+        QWidget.setTabOrder(self.bank_query_amount, self.bank_total_confirmed)
+        QWidget.setTabOrder(self.bank_total_confirmed, self.bank_closing_date)
+        QWidget.setTabOrder(self.bank_closing_date, self.bank_due_date)
+        QWidget.setTabOrder(self.bank_due_date, self.bank_query_save)
+        self._add_advanced_section(bank_body, 'Opciones avanzadas', advanced_form)
+        self._add_advanced_section(bank_body,'Tarjetas de una misma línea',scope_form)
         self.bank_query_save.setObjectName('primaryAction')
+        self.bank_breakdown_toggle=QPushButton('Ver desglose bancario')
+        self.bank_breakdown_toggle.setCheckable(True)
+        self.bank_breakdown=CardExplanation()
+        self.bank_breakdown.setWordWrap(True)
+        self.bank_breakdown.setTextFormat(Qt.TextFormat.RichText)
+        self.bank_breakdown.hide()
+        self.bank_breakdown_toggle.toggled.connect(self.bank_breakdown.setVisible)
+        bank_body.addWidget(self.bank_breakdown_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        bank_body.addWidget(self.bank_breakdown)
+        self.bank_history_toggle=QPushButton('Ver historial de consultas')
+        self.bank_history_toggle.setCheckable(True)
+        self.bank_history=QTableWidget(0,6)
+        self.bank_history.setHorizontalHeaderLabels(['Consulta','Concepto','Banco','Valenza al guardar','Diferencia','Tarjeta / cuenta'])
+        self.bank_history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.bank_history.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.bank_history.setMaximumHeight(190)
+        self.bank_history.horizontalHeader().setMinimumSectionSize(100)
+        self.bank_history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.bank_history.itemSelectionChanged.connect(self._select_bank_history)
+        self.bank_history_detail=CardExplanation()
+        self.bank_history_detail.setWordWrap(True)
+        self.bank_history.hide(); self.bank_history_detail.hide()
+        self.bank_history_toggle.toggled.connect(self.bank_history.setVisible)
+        self.bank_history_toggle.toggled.connect(self.bank_history_detail.setVisible)
+        bank_body.addWidget(self.bank_history_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        bank_body.addWidget(self.bank_history)
+        bank_body.addWidget(self.bank_history_detail)
+        for label in bank_panel.findChildren(QLabel):
+            label.setSizePolicy(QSizePolicy.Policy.Preferred,QSizePolicy.Policy.Minimum)
 
         payments_body = self._cards_panel(layout, 'payments', 'Pagos reales e historial', 'Dinero pagado a la tarjeta. Independiente de los abonos familiares.')
         form = QGridLayout()
@@ -732,11 +978,12 @@ class MainWindow(QMainWindow):
         self.apply_card_button.clicked.connect(self._apply_card_payment)
         self.apply_card_button.setToolTip('Requiere un pago disponible, una cuota pendiente y un importe válido para ambos.')
         application_form.addWidget(self.apply_card_button, 2, 2, 1, 2)
+        self.card_application_form = application_form
         msi_body.addLayout(application_form)
         self.apply_card_button.setObjectName('primaryAction')
         self.card_payment_history = QTableWidget(0, 6)
         self.card_payment_history.setHorizontalHeaderLabels(
-            ["Fecha", "Importe", "Referencia", "Estado", "ID", "Disponible"]
+            ["Fecha", "Importe", "Referencia", "Estado", "ID", "Sin asignar a cuotas"]
         )
         self.card_payment_history.setColumnHidden(4, True)
         self.card_payment_history.setMinimumHeight(0)
@@ -782,6 +1029,9 @@ class MainWindow(QMainWindow):
         calendar_note = QLabel('Fechas de la tarjeta seleccionada en la tabla superior.')
         calendar_note.setWordWrap(True)
         calendar.addWidget(calendar_note, 3, 0, 1, 4)
+        self.card_calendar_layout = calendar
+        self.card_calendar_tail = (calendar.itemAtPosition(1, 2).widget(), self.card_due_day,
+                                   calendar_button, calendar_note)
         self._add_advanced_section(admin_body, "Fechas de corte y pago", calendar)
 
         administration = QGridLayout()
@@ -818,11 +1068,11 @@ class MainWindow(QMainWindow):
         self.admin_card_description.setPlaceholderText('Descripción opcional')
         add_card_button = QPushButton("Agregar tarjeta")
         add_card_button.clicked.connect(self._add_instrument)
-        edit_card_button = QPushButton("Guardar cambios")
+        edit_card_button = QPushButton("Guardar cuenta")
         edit_card_button.clicked.connect(self._edit_instrument)
         toggle_card_button = QPushButton("Activar/desactivar")
         toggle_card_button.clicked.connect(self._toggle_instrument)
-        hint = QLabel('Para editar, selecciona la tarjeta o billetera en la tabla superior. Se conserva su identificador e historial.')
+        hint = QLabel('Selecciona una tarjeta o billetera para editarla. Su historial se conserva.')
         hint.setWordWrap(True)
         administration.addWidget(hint, 3, 0, 1, 3)
         for row, label, widget in ((4, 'Institución de la cuenta', self.admin_card_institution),
@@ -841,7 +1091,17 @@ class MainWindow(QMainWindow):
         for button, text in ((add_institution_button, 'Agregar institución'), (edit_institution_button, 'Guardar nombre'),
                              (toggle_institution_button, 'Activar/desactivar'), (add_card_button, 'Agregar cuenta')):
             button.setText(text)
+        # Establish QWidget ownership before moving controls into nested layouts.
+        # With an unattached grid, Qt can retain stale native layout items.
         self._add_advanced_section(admin_body, "Administrar instituciones y tarjetas", administration)
+        for row, buttons in ((2, (add_institution_button, edit_institution_button, toggle_institution_button)),
+                             (9, (add_card_button, edit_card_button, toggle_card_button))):
+            actions = QWidget()
+            flow = FlowLayout(actions)
+            for button in buttons:
+                administration.removeWidget(button)
+                flow.addWidget(button)
+            administration.addWidget(actions, row, 0, 1, 3)
         self._load_admin_catalogs()
 
         self.card_detail = QLabel("Selecciona una tarjeta para ver sus compras.")
@@ -855,14 +1115,33 @@ class MainWindow(QMainWindow):
         detail_scroll.setFixedHeight(154)
         self.cards_summary_layout.addWidget(detail_scroll)
         self.card_detail_scroll = detail_scroll
-        for grid in (bank_form, form, application_form, payment_actions, calendar, administration):
+        self.card_detail_toggle = QPushButton('Ver desglose de la tarjeta')
+        self.card_detail_toggle.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.card_detail_toggle.setCheckable(True)
+        self.card_detail_toggle.toggled.connect(detail_scroll.setVisible)
+        self.cards_summary_layout.insertWidget(self.cards_summary_layout.indexOf(detail_scroll), self.card_detail_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        detail_scroll.hide()
+        self.card_period_notice = QLabel()
+        self.card_period_notice.setWordWrap(True)
+        self.card_period_notice.setObjectName('secondaryText')
+        self.cards_summary_layout.insertWidget(self.cards_summary_layout.indexOf(self.card_detail_toggle), self.card_period_notice)
+        for grid in (form, application_form, payment_actions, calendar, administration):
             for index in range(grid.count()):
                 widget = grid.itemAt(index).widget()
+                if isinstance(widget, QLabel):
+                    row, column, _, _ = grid.getItemPosition(index)
+                    adjacent = grid.itemAtPosition(row, column + 1)
+                    field = adjacent.widget() if adjacent else None
+                    if isinstance(field, (QLineEdit, QComboBox, QDateEdit, QSpinBox)):
+                        widget.setBuddy(field)
+                        if not field.accessibleName():
+                            field.setAccessibleName(widget.text())
                 if isinstance(widget, QPushButton):
                     grid.setAlignment(widget, Qt.AlignmentFlag.AlignLeft)
                 elif isinstance(widget, QComboBox):
                     widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
                     widget.setMinimumContentsLength(16)
+        self.card_panels['bank'][0].toggled.connect(lambda _: self._fit_card_tables())
         self._load_card_catalogs()
         self._refresh_cards()
         layout.addStretch()
@@ -899,6 +1178,25 @@ class MainWindow(QMainWindow):
         return inner
 
     def _fit_card_tables(self):
+        width = self.cards_scroll.viewport().width()
+        columns = 3 if width >= 780 else 2 if width >= 560 else 1
+        for index, card in enumerate(self.card_summary_cards):
+            self.card_indicators.removeWidget(card)
+            self.card_indicators.addWidget(card, index // columns, index % columns)
+        for column in range(3):
+            self.card_indicators.setColumnStretch(column, 1 if column < columns else 0)
+        narrow = width < 650
+        self.card_application_form.removeWidget(self.apply_card_button)
+        self.card_application_form.addWidget(self.apply_card_button, 3 if narrow else 2,
+                                              1 if narrow else 2, 1, 3 if narrow else 2, Qt.AlignmentFlag.AlignLeft)
+        calendar = self.card_calendar_layout
+        label, due, save, note = self.card_calendar_tail
+        for widget in self.card_calendar_tail:
+            calendar.removeWidget(widget)
+        calendar.addWidget(label, 2 if narrow else 1, 0 if narrow else 2)
+        calendar.addWidget(due, 2 if narrow else 1, 1 if narrow else 3)
+        calendar.addWidget(save, 3 if narrow else 2, 0 if narrow else 2, 1, 2, Qt.AlignmentFlag.AlignLeft)
+        calendar.addWidget(note, 4 if narrow else 3, 0, 1, 2 if narrow else 4)
         if hasattr(self, 'card_detail_scroll'):
             width = max(100, self.card_detail_scroll.viewport().width() - 20)
             self.card_detail.setMinimumHeight(max(40, self.card_detail.heightForWidth(width)))
@@ -919,6 +1217,19 @@ class MainWindow(QMainWindow):
                 + table.horizontalScrollBar().sizeHint().height())
 
     @staticmethod
+    def _cards_compact_form():
+        """Let Qt size rows and wrap labels when horizontal space is limited."""
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        form.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        return form
+
+    @staticmethod
     def _add_advanced_section(layout: QVBoxLayout, label: str, content_layout) -> None:
         toggle = QPushButton(label)
         toggle.setCheckable(True)
@@ -926,7 +1237,8 @@ class MainWindow(QMainWindow):
         content.setLayout(content_layout)
         content.setVisible(False)
         toggle.toggled.connect(content.setVisible)
-        layout.addWidget(toggle)
+        toggle.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        layout.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(content)
 
     def _load_card_catalogs(self) -> None:
@@ -943,17 +1255,115 @@ class MainWindow(QMainWindow):
         for item in self.repository.list_instruments(institution_id) if institution_id else []:
             self.card_instrument.addItem(brand_icon(self.card_institution.currentText(), "institution"), str(item["alias"]), item["id"])
 
+    def _forecast_date(self):
+        return date.fromisoformat(self._forecast_period+'-01') if getattr(self, '_forecast_period', None) else date.today()
+
+    def _make_period_picker(self):
+        picker = QDateEdit()
+        picker.setDisplayFormat('MM/yyyy')
+        picker.setCalendarPopup(True)
+        picker.setAccessibleName('Periodo de vencimiento del calendario')
+        today = self._forecast_date()
+        picker.setDate(QDate(today.year, today.month, 1))
+        picker.dateChanged.connect(self._change_forecast_period)
+        return picker
+
+    def _change_forecast_period(self, value):
+        self._forecast_period = value.toString('yyyy-MM')
+        for name in ('bank_period_picker', 'dashboard_period_picker'):
+            picker = getattr(self, name, None)
+            if picker:
+                with QSignalBlocker(picker):
+                    picker.setDate(QDate(value.year(), value.month(), 1))
+        if hasattr(self, 'pages'):
+            self._refresh_cards()
+            self._refresh_dashboard()
+
+    def _bank_consulted_at(self):
+        return (self.bank_query_date.text().strip() if self.bank_date_manual.isChecked()
+                else datetime.now().astimezone().isoformat(timespec='seconds'))
+
+    def _preview_bank_query(self, *_):
+        if not hasattr(self, 'bank_query_feedback'):
+            return
+        account = next((a for a in self.repository.list_bank_comparisons(as_of=self._forecast_date())
+                        if self._selected_card_id() in a['members']), None)
+        self.bank_query_label.setVisible(self.bank_query_type.currentData() == 'OTHER')
+        self.bank_total_confirmed.setVisible(self.bank_query_type.currentData() == 'TOTAL')
+        for field in (self.bank_closing_date, self.bank_due_date, self.bank_closing_label, self.bank_due_label):
+            field.setVisible(self.bank_query_type.currentData() == 'NO_INTEREST')
+        message = 'Introduce el importe del banco. Puedes guardarlo como referencia del periodo, sin crear movimientos.'
+        if account:
+            forecast = account['monthly_forecast']
+            self.bank_query_comparison.setText(
+                f"Deuda total Valenza: {format_money(account['calculated_cents'])} · incluye MSI futuros.\n"
+                f"{account['alias']} · {period_label(forecast['period'])} · Programado antes de pagos: {scheduled_text(forecast, format_money)}\n"
+                + forecast_notice(forecast) + '\n' + ' '.join(account['warnings']))
+            self.bank_breakdown.setText(breakdown_html(account['components'], format_money)
+                + financial_text_html(forecast_text(forecast, format_money)))
+            official = official_period_query(self.repository.list_bank_reconciliation_history(),account,self._forecast_date().strftime('%Y-%m'))
+            if official:
+                self.bank_query_comparison.setText(self.bank_query_comparison.text()+'\n'+official_text(official,format_money))
+        if account and self.bank_query_amount.text().strip():
+            try:
+                amount = self._parse_mxn_to_cents(self.bank_query_amount.text())
+                from valenza.persistence.bank_reconciliation import same_moment
+                if self.bank_query_type.currentData() != 'TOTAL':
+                    message = monthly_comparison_text(account['monthly_forecast'],amount,self.bank_query_type.currentData(),
+                        format_money,reliable=account['comparable'])
+                elif not self.bank_total_confirmed.isChecked():
+                    message = 'No comparable: confirma que el importe incluye la misma deuda total, con MSI futuros y movimientos ya aplicados. Se puede guardar como referencia.'
+                elif not account['comparable']:
+                    message = 'No comparable: el alcance de la línea no permite confirmar una deuda neta fiable.'
+                elif self._forecast_date().strftime('%Y-%m') != date.today().strftime('%Y-%m'):
+                    message = 'No comparable: el periodo seleccionado no es el actual. No se compara ese periodo con la deuda total actual.'
+                elif not same_moment(self._bank_consulted_at()):
+                    message = 'No comparable: esa fecha y hora no corresponden a la deuda actual. Se puede guardar como referencia, sin confirmar coincidencia.'
+                else:
+                    delta = amount - account['calculated_cents']
+                    message = ('Los saldos coinciden para la deuda total actual.' if delta == 0 else
+                               difference_text(delta, format_money) + '. Puede haber cargos o pagos aún sin registrar. Revisa los detalles antes de concluir que hay un error.')
+            except ValueError:
+                message = 'Introduce un importe válido en pesos para comprobarlo.'
+        self.bank_query_feedback.setText(message)
+        if hasattr(self, 'card_application_form'):
+            self._fit_card_tables()
+
     def _record_bank_query(self):
         instrument_id = self._selected_card_id()
         try:
             if not instrument_id or not self.bank_query_amount.text().strip():
-                raise ValueError('Selecciona la tarjeta e introduce su deuda total informada por el banco.')
+                raise ValueError('Selecciona la tarjeta e introduce el importe informado por el banco.')
+            official = self.bank_query_type.currentData() == 'NO_INTEREST'
+            if official and (not self.bank_closing_date.text().strip() or not self.bank_due_date.text().strip()):
+                raise ValueError('Copia la fecha de corte y la fecha límite que muestra el banco.')
             self.repository.record_bank_balance(instrument_id,
-                self._parse_mxn_to_cents(self.bank_query_amount.text()), self.bank_query_date.text().strip())
+                self._parse_mxn_to_cents(self.bank_query_amount.text()), self._bank_consulted_at(),
+                balance_type=self.bank_query_type.currentData(), period=self._forecast_date().strftime('%Y-%m'),
+                balance_label=self.bank_query_label.text(),
+                closing_date=self.bank_closing_date.text().strip() if official else None,
+                due_date=self.bank_due_date.text().strip() if official else None,
+                total_confirmed=self.bank_total_confirmed.isChecked())
         except ValueError as error:
             self._show_error(self._safe_error(error))
             return
         self.data_changed.emit('cards')
+        self.bank_query_amount.clear()
+
+        self._show_information('Comparación guardada en el historial.')
+
+    def _record_bank_scope(self):
+        try:
+            self.repository.set_bank_reconciliation_scope(self._selected_card_id(),self.bank_scope.currentData())
+        except ValueError as error:
+            self._show_error(self._safe_error(error)); return
+        self.data_changed.emit('cards')
+        self._show_information('Vínculo informativo guardado.')
+
+    def _select_bank_history(self):
+        rows=self.bank_history.selectionModel().selectedRows()
+        query=self.bank_history.item(rows[0].row(),0).data(Qt.ItemDataRole.UserRole) if rows else None
+        self.bank_history_detail.setText(query_text(query,format_money))
 
     def _refresh_cards(self) -> None:
         if not hasattr(self, "cards_table"):
@@ -961,8 +1371,13 @@ class MainWindow(QMainWindow):
         selected_id = self._selected_card_id()
         blocker = QSignalBlocker(self.cards_table)
         self.cards_table.setRowCount(0)
-        comparisons = {item['instrument_id']: item for item in self.repository.list_bank_comparisons()}
+        comparisons = {item['instrument_id']: item for item in self.repository.list_bank_comparisons(as_of=self._forecast_date())}
+        for account in list(comparisons.values()):
+            for member in account['members']:
+                comparisons[member]=account
         for card in self.repository.list_card_summaries(include_inactive=True):
+            from valenza.persistence.bank_periods import period_forecast
+            period = period_forecast(self.repository, [card['instrument_id']], self._forecast_date())
             comparison = comparisons.get(card['instrument_id'])
             row = self.cards_table.rowCount()
             self.cards_table.insertRow(row)
@@ -971,20 +1386,24 @@ class MainWindow(QMainWindow):
                 format_money(int(card["charged_cents"])),
                 format_money(int(card["paid_cents"])),
                 format_money(int(card["remaining_cents"])),
-                format_money(int(card["scheduled_month_cents"])),
-                format_money(int(card["scheduled_future_cents"])),
+                scheduled_text(period,format_money),
+                format_money(period['future_cents']),
                 card["closing_day"] or "Pendiente",
                 card["due_day"] or "Pendiente",
                 card["next_cut"] or "Pendiente de confirmar",
                 card["next_due"] or "Pendiente de confirmar",
                 "Activa" if card["active"] else "Inactiva",
                 card["instrument_id"],
-                format_money(comparison['reported_cents']) if comparison and comparison['reported_cents'] is not None else 'Sin consultar' if comparison else 'No aplica',
-                comparison['consulted_at'] or 'Sin consultar' if comparison else 'No aplica',
-                format_money(comparison['difference_cents']) if comparison and comparison['difference_cents'] is not None else 'Sin consultar' if comparison else 'No aplica',
+                reported_text(comparison['last_query'],format_money) if comparison else 'No aplica',
+                comparison['consulted_at'] or 'Sin consulta' if comparison else 'No aplica',
+                difference_text(comparison['difference_cents'],format_money) if comparison and comparison['last_query'] else 'Sin consulta' if comparison else 'No aplica',
             )
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
+                if column in (5, 6):
+                    cell.setToolTip(forecast_text(period, format_money))
+                if column in (13,14,15) and comparison:
+                    cell.setToolTip('Cuenta / línea: '+comparison['alias']+'\n'+query_text(comparison['last_query'],format_money)+'\n'+' '.join(comparison['warnings']))
                 if column == 1:
                     cell.setIcon(brand_icon(card['institution_name'], 'institution'))
                     cell.setToolTip(str(value))
@@ -1007,17 +1426,63 @@ class MainWindow(QMainWindow):
         self.admin_card_type.setEnabled(instrument_id is None)
         selection_changed = getattr(self, '_bank_query_selection', None) != instrument_id
         if selection_changed:
+            self.bank_date_manual.setChecked(False)
+            self.bank_total_confirmed.setChecked(False)
+            self.bank_closing_date.clear()
+            self.bank_due_date.clear()
             self.bank_query_amount.clear()
-            self.bank_query_date.setText(date.today().isoformat())
+            self.bank_query_date.setText(datetime.now().astimezone().isoformat(timespec='seconds'))
         self._bank_query_selection = instrument_id
-        comparison = next((item for item in self.repository.list_bank_comparisons() if item['instrument_id'] == instrument_id), None)
+        accounts = self.repository.list_bank_comparisons(as_of=self._forecast_date())
+        comparison = next((item for item in accounts if instrument_id in item['members']), None)
         self.bank_query_save.setEnabled(comparison is not None)
-        self.bank_query_comparison.setText(
-            f"Consulta de {comparison['alias']} · {comparison['institution_name']}\nValenza: {format_money(comparison['calculated_cents'])} · Banco: {format_money(comparison['reported_cents'])} "
-            f"({comparison['consulted_at']}) · Diferencia banco − Valenza: {format_money(comparison['difference_cents'])}"
-            if comparison and comparison['reported_cents'] is not None else 'Saldo bancario: Sin consultar' if comparison else
-            'Selecciona una tarjeta o línea de crédito para consultar su deuda total.')
+        self.bank_scope_save.setEnabled(comparison is not None)
+        self.bank_scope.clear()
+        if comparison:
+            self.bank_scope.addItem('Esta cuenta independiente',instrument_id)
+            institution=self.repository.database.connection.execute('SELECT institution_id FROM payment_instrument WHERE id=?',(instrument_id,)).fetchone()[0]
+            for account in accounts:
+                same=self.repository.database.connection.execute('SELECT institution_id FROM payment_instrument WHERE id=?',(account['account_id'],)).fetchone()[0]==institution
+                if same and account['account_id']!=instrument_id:
+                    self.bank_scope.addItem(account['alias']+' · línea compartida',account['account_id'])
+            self.bank_scope.setCurrentIndex(self.bank_scope.findData(comparison['account_id']))
+            if selection_changed:
+                self.bank_query_type.setCurrentIndex(0)
+            self.bank_query_comparison.setText(
+                f"Deuda total calculada por Valenza: {format_money(comparison['calculated_cents'])}\n"
+                f"{comparison['alias']} · {comparison['institution_name']}\n" + ' '.join(comparison['warnings']))
+            self.bank_breakdown.setText(breakdown_html(comparison['components'],format_money))
+        else:
+            self.bank_query_comparison.setText('Selecciona una tarjeta o línea de crédito para consultar su deuda total.')
+            self.bank_breakdown.clear()
+        self._preview_bank_query()
+        blocker=QSignalBlocker(self.bank_history)
+        self.bank_history.setRowCount(0)
+        history=self.repository.list_bank_reconciliation_history() if comparison else []
+        account_names = {str(i['id']): str(i['alias']) for i in self.repository.list_all_instruments()}
+        for query in history:
+            if query['account_id'] not in comparison['members']:
+                continue
+            row=self.bank_history.rowCount(); self.bank_history.insertRow(row)
+            concept = {'TOTAL': 'Deuda total', 'NO_INTEREST': 'Sin intereses',
+                       'MINIMUM': 'Pago mínimo', 'OTHER': 'Otro saldo'}.get(
+                           query['balance_type'], BALANCE_TYPES[query['balance_type']])
+            difference = ('Sin comparación' if query['difference_cents'] is None else
+                          format_money(query['difference_cents']))
+            values=(query['consulted_at'],concept,format_money(query['amount_cents']),
+                format_money(query['calculated_cents']) if query['calculated_cents'] is not None else 'Sin fotografía',
+                difference,account_names.get(str(query['account_id']), 'Cuenta no disponible'))
+            for col,value in enumerate(values):
+                item=QTableWidgetItem(value); item.setToolTip(query_text(query,format_money))
+                if col==0: item.setData(Qt.ItemDataRole.UserRole,query)
+                if col==5:
+                    item.setData(Qt.ItemDataRole.UserRole, query['account_id'])
+                    item.setToolTip(value)
+                self.bank_history.setItem(row,col,item)
+        blocker.unblock()
+        self.bank_history_detail.setText('Selecciona una consulta para ver su fotografía y advertencias.' if history else 'Sin consulta')
         if instrument_id is None:
+            self.card_period_notice.clear()
             for card in self.card_summary_cards:
                 card.findChild(QLabel, 'summaryAmount').setText('\u2014')
             self.card_detail.setText("Selecciona una tarjeta para ver sus compras.")
@@ -1043,11 +1508,20 @@ class MainWindow(QMainWindow):
                     self.card_instrument.setCurrentIndex(self.card_instrument.findData(instrument_id))
         summary = next(i for i in self.repository.list_card_summaries(include_inactive=True)
                        if i["instrument_id"] == instrument_id)
+        from valenza.persistence.bank_periods import period_forecast
+        period = period_forecast(self.repository, [instrument_id], self._forecast_date())
         for widget, field in zip(self.card_summary_cards, ('remaining_cents', 'scheduled_month_cents', 'scheduled_future_cents')):
             if widget is self.card_summary_cards[0]:
                 field = ('wallet_balance_cents' if summary['instrument_type'] == 'WALLET_BALANCE' else
                          'cash_balance_cents' if summary['instrument_type'] == 'OTHER' else field)
             widget.findChild(QLabel, 'summaryAmount').setText(format_money(int(summary[field])))
+        for widget, field in zip(self.card_summary_cards[1:], ('current_cents', 'future_cents')):
+            widget.findChild(QLabel, 'summaryAmount').setText(format_money(period[field]))
+            widget.setToolTip(forecast_text(period, format_money))
+        self.card_summary_cards[1].findChild(QLabel,'summaryAmount').setText(scheduled_text(period,format_money))
+        self.card_summary_cards[1].layout().itemAt(0).widget().setText(f"{period_label(period['period'])} · antes de pagos")
+        self.card_period_notice.setText(forecast_notice(period))
+        self.card_period_notice.setToolTip('\n'.join(period['warnings']))
         self.card_summary_cards[0].layout().itemAt(0).widget().setText(
             'Saldo registrado seleccionado' if summary['instrument_type'] in ('WALLET_BALANCE', 'OTHER') else 'Deuda total (incluye futuras)')
         details = [
@@ -1056,11 +1530,7 @@ class MainWindow(QMainWindow):
              f"Saldo registrado en otro medio: {format_money(int(summary['cash_balance_cents']))}"
              if summary['instrument_type'] == 'OTHER' else
              f"Deuda total registrada (incluye cuotas futuras): {format_money(int(summary['remaining_cents']))}"),
-            f"Cuotas MSI previstas este mes: {format_money(int(summary['scheduled_month_cents']))}",
-            f"Cuotas MSI de meses anteriores pendientes: {format_money(int(summary['scheduled_overdue_cents']))}",
-            f"Cuotas MSI de meses futuros: {format_money(int(summary['scheduled_future_cents']))}",
-            f"Cuotas MSI sin fecha: {format_money(int(summary['scheduled_undated_cents']))}",
-            'El calendario anterior usa las fechas capturadas; no suma cuotas futuras al mes actual.',
+            forecast_text(period, format_money),
             (f"MSI por pagar hasta hoy: {format_money(int(summary['exigible_cents']))} · "
              'importe adicional por confirmar con el calendario bancario'
              if summary['pending_confirmation_cents'] and summary['exigible_cents'] else
@@ -1078,7 +1548,7 @@ class MainWindow(QMainWindow):
             return
         details.append("Compras asociadas:")
         details.extend(
-            f"- {item['ordered_at']} · {item['merchant']} · "
+            f"- {date_label(item['ordered_at'])} · {item['merchant']} · "
             f"{format_money(int(item['charged_cents']))}"
             for item in purchases
         )
@@ -1090,8 +1560,8 @@ class MainWindow(QMainWindow):
                 f"- Cuota {item['number']}: "
                 f"total {format_money(int(item['principal_cents']) + int(item['interest_cents']))} · "
                 f"pendiente {format_money(int(item['remaining_cents']))} · "
-                f"{item['due_date'] or 'Vencimiento pendiente'} · "
-                f"{item['period_key'] or 'Periodo pendiente de confirmar'} · "
+                f"{date_label(item['due_date']) or 'Vencimiento pendiente'} · "
+                f"{period_label(item['period_key']) if item['period_key'] else 'Periodo por confirmar'} · "
                 f"{'Pagada' if item['payment_status'] == 'PAID' else 'Pago parcial' if item['payment_status'] == 'PARTIAL' else 'Pendiente'}"
                 for item in installments
             )
@@ -1130,7 +1600,7 @@ class MainWindow(QMainWindow):
                 payment["paid_at"],
                 format_money(int(payment["amount_cents"])),
                 payment["reference"] or "",
-                "ANULADO" if payment["payment_status"] == "CANCELLED" else "Activo",
+                "Anulado" if payment["payment_status"] == "CANCELLED" else "Activo",
                 payment["id"],
                 format_money(max(available, 0)),
             )
@@ -1138,7 +1608,7 @@ class MainWindow(QMainWindow):
                 self.card_payment_history.setItem(row, column, QTableWidgetItem(str(value)))
             if available > 0 and payment["payment_status"] == "ACTIVE":
                 self.card_apply_payment.addItem(
-                    f"{payment['paid_at']} · disponible {format_money(available)}",
+                    f"{payment['paid_at']} · sin asignar a cuotas {format_money(available)}",
                     payment["id"],
                 )
                 self.card_apply_payment.setItemData(self.card_apply_payment.count() - 1, available,
@@ -1480,6 +1950,7 @@ class MainWindow(QMainWindow):
         outer.addLayout(summary)
         outer.addWidget(self.collection_totals)
         self.collection_filter = QComboBox()
+        self.collection_filter.setAccessibleName('Filtrar deudas por participación')
         self.collection_filter.addItem("Todos", "ALL")
         self.collection_filter.addItem("Mi parte", "PERSONAL")
         self.collection_filter.addItem("Cobros familiares", "FAMILY")
@@ -1494,7 +1965,7 @@ class MainWindow(QMainWindow):
         filters.addWidget(self.family_pdf_button)
         outer.addLayout(filters)
         footer_layout = outer
-        self.collections_scroll = QScrollArea()
+        self.collections_scroll = WarmScrollArea()
         self.collections_scroll.setWidgetResizable(True)
         collections_content = QWidget()
         collections_content.setObjectName('warmCollectionsContent')
@@ -1502,6 +1973,13 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 4, 0)
         outer.setSpacing(8)
         outer.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        # Keep every action reachable vertically when the window is short.
+        footer_layout.removeItem(summary)
+        footer_layout.removeWidget(self.collection_totals)
+        footer_layout.removeItem(filters)
+        outer.addLayout(summary)
+        outer.addWidget(self.collection_totals)
+        outer.addLayout(filters)
         self.collections_scroll.setWidget(collections_content)
         footer_layout.addWidget(self.collections_scroll, 1)
         self.collections_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1539,9 +2017,22 @@ class MainWindow(QMainWindow):
             self._select_collection_item
         )
         debts_body.addWidget(self.collection_items)
+        self.collections_empty_notice = QLabel('No hay deudas en este filtro. Prueba otra participación.')
+        self.collections_empty_notice.setObjectName('secondaryText')
+        self.collections_empty_notice.setWordWrap(True)
+        debts_body.addWidget(self.collections_empty_notice)
 
-        payment, payment_body = warm_section('Movimiento seleccionado · registro de abono')
+        payment, payment_body = warm_section('Abono individual · movimiento seleccionado')
         outer.addWidget(payment)
+        self._collection_return_context = None
+        self._consulting_receipt = False
+        self.collection_mode_notice = QLabel('Nuevo abono: selecciona una participación. Para editar un abono existente, abre su historial.')
+        self.collection_mode_notice.setWordWrap(True)
+        payment_body.addWidget(self.collection_mode_notice)
+        self.collection_return_button = QPushButton('Volver a mi selección y borrador')
+        self.collection_return_button.clicked.connect(self._return_to_collection_draft)
+        self.collection_return_button.hide()
+        payment_body.addWidget(self.collection_return_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.collection_selected_details = QLabel('Selecciona una deuda para consultar sus importes.')
         self.collection_selected_details.setWordWrap(True)
         self.collection_selected_details.setTextFormat(Qt.TextFormat.RichText)
@@ -1554,6 +2045,7 @@ class MainWindow(QMainWindow):
         self.collection_current_balance.setWordWrap(True)
         payment_row.addWidget(self.collection_current_balance, 0, 0, 1, 3)
         self.collection_amount = QLineEdit()
+        self.collection_amount.setAccessibleName('Importe del abono seleccionado en MXN')
         self.collection_amount.setPlaceholderText("Importe del abono")
         payment_row.addWidget(QLabel("Abono (MXN)"), 1, 0)
         payment_row.addWidget(self.collection_amount, 1, 1)
@@ -1562,8 +2054,11 @@ class MainWindow(QMainWindow):
         self.record_collection_button.setDefault(True)
         payment_row.addWidget(self.record_collection_button, 1, 2)
         payment_row.setColumnStretch(1, 1)
+        self.collection_payment_layout = payment_row
         self.record_collection_button.setObjectName('primaryAction')
-        payment_body.addLayout(payment_row)
+        self.collection_capture_form = QWidget()
+        self.collection_capture_form.setLayout(payment_row)
+        payment_body.addWidget(self.collection_capture_form)
 
         self.collection_details_toggle = QPushButton("Más detalles")
         self.collection_details_toggle.setCheckable(True)
@@ -1577,8 +2072,10 @@ class MainWindow(QMainWindow):
         self.collection_details = QWidget()
         details_layout = QGridLayout(self.collection_details)
         self.collection_reference = QLineEdit()
+        self.collection_reference.setAccessibleName('Referencia opcional del abono individual')
         self.collection_reference.setPlaceholderText("Referencia opcional")
         self.collection_received_date = QLineEdit(date.today().isoformat())
+        self.collection_received_date.setAccessibleName('Fecha del abono individual, AAAA-MM-DD')
         self.collection_received_date.setPlaceholderText("AAAA-MM-DD")
         details_layout.addWidget(QLabel("Fecha del abono"), 0, 2)
         details_layout.addWidget(self.collection_received_date, 0, 3)
@@ -1642,6 +2139,10 @@ class MainWindow(QMainWindow):
         history, history_body = warm_section('Historial de abonos')
         outer.addWidget(history)
         history_body.addWidget(self.collection_history_toggle)
+        self.collection_integrity_warning = QLabel()
+        self.collection_integrity_warning.setWordWrap(True)
+        self.collection_integrity_warning.setAccessibleName('Aviso de consistencia de abonos')
+        history_body.addWidget(self.collection_integrity_warning)
         self.collection_history = QTableWidget(0, 8)
         self.collection_history.setHorizontalHeaderLabels(
             ["Fecha", "Persona", "Comercio", "Importe", "Referencia", "Estado", "ID", "Tipo"]
@@ -1663,7 +2164,7 @@ class MainWindow(QMainWindow):
         self.collection_history.setMinimumHeight(0)
         self.collection_history.hide()
         receipt_actions = QGridLayout()
-        self.edit_receipt_button = QPushButton("Guardar cambios del abono")
+        self.edit_receipt_button = QPushButton("Editar abono seleccionado")
         self.edit_receipt_button.clicked.connect(self._edit_selected_receipt)
         self.cancel_receipt_button = QPushButton("Anular abono")
         self.cancel_receipt_button.clicked.connect(self._cancel_selected_receipt)
@@ -1691,6 +2192,14 @@ class MainWindow(QMainWindow):
         self._fill_combo(self.extra_person, [(str(p["name"]), str(p["id"])) for p in people])
         self._refresh_collection_items()
         self._collection_history_rows = self.repository.list_receipt_history()
+        issues = self.repository.receipt_inconsistencies()
+        self.collection_integrity_warning.setText(
+            f'{len(issues)} aplicación(es) de abonos anulados detectada(s). '
+            'No se cuentan como dinero recibido activo. No se modificaron los registros.' if issues else '')
+        self.collection_integrity_warning.setToolTip('\n'.join(
+            f"Abono {i['payment_id']} · cuenta {i['receivable_id']} · {format_money(i['amount_cents'])}"
+            for i in issues))
+        self.collection_integrity_warning.setVisible(bool(issues))
         self._render_collection_history()
 
     def _render_collection_history(self) -> None:
@@ -1727,7 +2236,7 @@ class MainWindow(QMainWindow):
                 item["source_name"],
                 format_money(int(item["amount_cents"])),
                 item["reference"] or "",
-                "ANULADO" if item["payment_status"] == "CANCELLED" else "Activo",
+                "Anulado" if item["payment_status"] == "CANCELLED" else "Activo",
             )
             for column, value in enumerate(values):
                 self.collection_history.setItem(
@@ -1739,6 +2248,8 @@ class MainWindow(QMainWindow):
                 self.collection_history.selectRow(row)
         blocker.unblock()
         self._style_collection_table(self.collection_history, (3,))
+        if self._consulting_receipt and self._selected_receipt_history():
+            self._select_receipt_history()
 
     def _selected_receipt_history(self) -> dict[str, object] | None:
         rows = self.collection_history.selectionModel().selectedRows()
@@ -1754,6 +2265,15 @@ class MainWindow(QMainWindow):
         item = self._selected_receipt_history()
         if item is None:
             return
+        self._remember_collection_draft()
+        self._consulting_receipt = True
+        self._show_collection_capture(False)
+        self.collection_mode_notice.setText('Consultando abono del '+date_label(str(item['received_at'])[:10])+
+            ' · '+str(item['user_name'])+'. Solo lectura. Usa Editar abono seleccionado para modificar este mismo registro.')
+        self.collection_return_button.show()
+        for field in (self.collection_amount,self.collection_received_date,self.collection_reference):
+            field.setReadOnly(True)
+        self.record_collection_button.setEnabled(False)
         with QSignalBlocker(self.collection_items):
             self.collection_items.clearSelection()
         self.collection_payment_identity.set_instrument(None)
@@ -1761,38 +2281,87 @@ class MainWindow(QMainWindow):
             f"<b>{escape(str(item['user_name']))}</b> · {escape(str(item['source_name'] or 'Sin comercio identificado'))}<br>"
             f"{escape(self._participation_label(item['payment_kind']))} · Abono: <b>{escape(format_money(int(item['amount_cents'])))}</b>"
         )
-        self.collection_amount.setText(
-            f"{Decimal(int(item['amount_cents'])) / Decimal('100'):.2f}"
-        )
-        self.collection_received_date.setText(str(item["received_at"])[:10])
-        self.collection_reference.setText(str(item["reference"] or ""))
         self.collection_current_balance.setText(
             f"Abono seleccionado: {item['user_name']} · "
             f"{format_money(int(item['amount_cents']))} · "
             f"{'ANULADO' if item['payment_status'] == 'CANCELLED' else 'Activo'}"
         )
+        applications = [r for r in self._collection_history_rows if r['id'] == item['id']]
+        self.collection_selected_details.setText(self.collection_selected_details.text()
+            + '<br>Estado: '+('Anulado' if item['payment_status']=='CANCELLED' else 'Activo')
+            + ' · Fecha: '+escape(date_label(str(item['received_at'])[:10]))
+            + ' · Referencia: '+escape(str(item['reference'] or 'Sin referencia'))
+            + '<br>'+'<br>'.join(escape(str(r['source_name']))+' · '
+                +escape(format_money(int(r['application_cents'] or 0)))+' · '
+                +('Aplicación activa' if r['application_status']=='ACTIVE' else 'Aplicación anulada' if r['application_status']=='CANCELLED' else 'Sin aplicación') for r in applications))
         if self.repository.is_global_receipt(item['id']):
             self.collection_current_balance.setText(self.collection_current_balance.text() +
                 '\nAbono global: edición de fecha/referencia; para cambiar importe o reparto, anula completo y registra el correcto.')
+
+    def _remember_collection_draft(self):
+        if self._collection_return_context is not None:return
+        self._collection_return_context = dict(
+            role=self.collection_filter.currentData(),
+            receivable=self._table_id(self.collection_items,7),
+            values=[f.text() for f in (self.collection_amount,self.collection_received_date,self.collection_reference)],
+            history=self.collection_history_toggle.isChecked(),
+            scroll=self.collections_scroll.verticalScrollBar().value())
+
+    def _show_collection_capture(self, visible):
+        self.collection_capture_form.setVisible(visible)
+        self.collection_details_toggle.setVisible(visible)
+        self.collection_details.setVisible(visible and self.collection_details_toggle.isChecked())
+
+    def _return_to_collection_draft(self):
+        context=self._collection_return_context
+        if context is None:return
+        self._consulting_receipt=False
+        self._show_collection_capture(True)
+        with QSignalBlocker(self.collection_filter):
+            self.collection_filter.setCurrentIndex(self.collection_filter.findData(context['role']))
+        with QSignalBlocker(self.collection_history):self.collection_history.clearSelection()
+        self._refresh_collection_items()
+        self._render_collection_history()
+        with QSignalBlocker(self.collection_items):
+            self.collection_items.clearSelection()
+            if context['receivable']:self._search_select(self.collection_items,7,context['receivable'])
+        self._show_collection_details()
+        for field,value in zip((self.collection_amount,self.collection_received_date,self.collection_reference),context['values']):
+            field.setReadOnly(False)
+            field.setText(value)
+        self.collection_history_toggle.setChecked(context['history'])
+        self.collections_scroll.verticalScrollBar().setValue(context['scroll'])
+        self.collection_mode_notice.setText('Nuevo abono · selección y borrador recuperados. Registrar crea un abono nuevo; no edita el historial.')
+        self.collection_return_button.hide()
+        self._collection_return_context=None
+        self._update_action_states()
 
     def _edit_selected_receipt(self) -> None:
         item = self._selected_receipt_history()
         if item is None:
             self._show_error("Selecciona un abono en el historial.")
             return
+        from valenza.gui.receipt_editor import ReceiptEditDialog
+        dialog = ReceiptEditDialog(item, self.repository.is_global_receipt(item['id']), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            dialog.deleteLater()
+            return
         try:
-            amount = self._parse_mxn_to_cents(self.collection_amount.text())
+            amount = self._parse_mxn_to_cents(dialog.amount.text())
+            edited_date = dialog.received_at.text().strip()
             self.repository.update_user_payment(
                 str(item["id"]),
-                received_at=self.collection_received_date.text().strip(),
+                received_at=edited_date,
                 amount_cents=amount,
-                reference=self.collection_reference.text().strip() or None,
+                reference=dialog.reference.text().strip() or None,
             )
         except (ValueError, *DATABASE_ERRORS) as error:
             self._show_error(self._safe_error(error))
             return
+        finally:
+            dialog.deleteLater()
         self.data_changed.emit("collections")
-        self._show_information("El abono quedó actualizado.")
+        self._show_saved_information("El abono quedó actualizado.", 'Cobros → Ver historial: '+str(item['user_name'])+' · '+date_label(edited_date)+' · '+str(item['source_name']))
 
     def _cancel_selected_receipt(self) -> None:
         item = self._selected_receipt_history()
@@ -1896,11 +2465,12 @@ class MainWindow(QMainWindow):
         else:
             self.collection_current_balance.setText(
                 f"{self.collection_items.item(row, 10).text()} · "
-                f"Saldo actual: {self.collection_items.item(row, 5).text()} · "
+                f"Pendiente: {self.collection_items.item(row, 5).text()} · "
                 f"{self.collection_items.item(row, 6).text()}"
             )
         self.collection_items.resizeRowsToContents()
         self._style_collection_table(self.collection_items, (3, 4, 5, 11, 12, 13))
+        self.collections_empty_notice.setVisible(self.collection_items.rowCount() == 0)
         self._show_collection_details()
 
     def _style_collection_table(self, table, money_columns):
@@ -1923,6 +2493,9 @@ class MainWindow(QMainWindow):
 
     def _reflow_collections(self):
         narrow = self.collections_scroll.viewport().width() < 950
+        payment = self.collection_payment_layout
+        payment.removeWidget(self.record_collection_button)
+        payment.addWidget(self.record_collection_button, 2 if narrow else 1, 1 if narrow else 2)
         details = self.collection_date_layout
         fields = (self.collection_reference, self.collection_received_date)
         for widget in (*self.collection_date_labels, *fields):
@@ -1981,6 +2554,10 @@ class MainWindow(QMainWindow):
                 "Selecciona una cuenta para ver el saldo."
             )
             return
+        self._consulting_receipt=False
+        self._show_collection_capture(True)
+        for field in (self.collection_amount,self.collection_received_date,self.collection_reference):field.setReadOnly(False)
+        self.collection_mode_notice.setText('Nuevo abono para la participación seleccionada. Registrar crea un abono nuevo; no modifica un abono del historial.')
         with QSignalBlocker(self.collection_history):
             self.collection_history.clearSelection()
         receivable_id = self.collection_items.item(row, 7).text()
@@ -2027,6 +2604,7 @@ class MainWindow(QMainWindow):
             self.record_collection_button.setEnabled(False)
             amount = self._parse_mxn_to_cents(self.collection_amount.text())
             receivable_id = self.collection_items.item(row, 7).text()
+            receipt_description = self.collection_items.item(row,0).text()+' · '+self.collection_items.item(row,2).text()+' · '+date_label(self.collection_received_date.text().strip())
             self.repository.record_receipt(
                 payment_id=str(uuid4()),
                 receivable_id=receivable_id,
@@ -2044,7 +2622,7 @@ class MainWindow(QMainWindow):
         self.collection_reference.clear()
         self.collection_received_date.setText(date.today().isoformat())
         self.data_changed.emit("collections")
-        self._show_information("Se actualizó la participación. No se registró ningún pago bancario.")
+        self._show_saved_information("Se actualizó la participación. No se registró ningún pago bancario.", 'Cobros → Ver historial: '+receipt_description)
 
     def _record_extra(self) -> None:
         user_id = self.extra_person.currentData()
@@ -2094,9 +2672,8 @@ class MainWindow(QMainWindow):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         notice = QLabel(
-            "Configura explícitamente el propietario persistente. "
-            "No se elige automáticamente por nombre y no se modifican "
-            "pedidos ni deudas históricas."
+            "Elige al propietario de Valenza y administra tus respaldos. "
+            "Cambiar el propietario no modifica pedidos ni deudas anteriores."
         )
         notice.setWordWrap(True)
         layout.addWidget(notice)
@@ -2251,18 +2828,27 @@ class MainWindow(QMainWindow):
         except Exception:
             self._show_error('No se pudo generar el PDF. Comprueba el destino y sus permisos. No se modificaron movimientos.')
             return
-        self._show_information('Estado de cuenta PDF generado; no se modificaron saldos.')
+        self._show_information('Estado de cuenta PDF generado: '+str(Path(path).resolve())+' · No se modificaron saldos.')
+
+    def _toggle_personal_privacy(self, visible):
+        self.dashboard_privacy.setText('👁 Ocultar importes' if visible else '👁 Mostrar importes')
+        self.dashboard_privacy.setAccessibleName('Ocultar importes personales' if visible else 'Mostrar importes personales')
+        self._refresh_dashboard()
 
     def _show_result_breakdown(self, visible):
         self.dashboard_result_details.setVisible(visible)
         if not visible or self.repository is None:
             return
-        rows = self.repository.expected_result_breakdown()
-        parts = ['<b>Familia asignada − costo efectivo de cada operación</b><br>Recompras vinculadas incluidas una vez. Antes de abonos personales; sin intereses ni comisiones.<br>']
-        for row in rows:
-            parts.append(f"<p>{escape(row['merchant'])} · {escape(row['date'])}<br>{format_money(row['family_cents'])} − {format_money(row['cost_cents'])} = <b>{format_money(row['result_cents'])}</b></p>")
-        total = sum(r['result_cents'] for r in rows)
-        parts.append(f"<b>Resultado previsto total {'a favor' if total >= 0 else 'a mi cargo'}: {format_money(abs(total))}</b><br>Los descuentos ya están reflejados en el costo efectivo; no se restan otra vez. No es dinero cobrado ni saldo bancario.")
+        if not self.dashboard_privacy.isChecked():
+            self.dashboard_result_details.setPlainText('Importes personales ocultos. ' + EXPLANATION)
+            return
+        projection = personal_result(self.repository)
+        rows = projection['rows']
+        parts = ['<b>Resultado personal previsto · por operación</b><br>']
+        for number,row in enumerate(rows,1):
+            parts.append(f"<p><b>{escape(row['merchant'])}</b> · {escape(date_label(row['date']))} · Operación {number}<br>Costo efectivo: {format_money(row['cost_cents'])} · Asignado a familiares: {format_money(row['family_cents'])}<br>Resultado personal previsto {result_label(row['result_cents'])}: <b>{format_money(abs(row['result_cents']))}</b></p>")
+        total = projection['result_cents']
+        parts.append(f"<p>Total costo efectivo: {format_money(sum(r['cost_cents'] for r in rows))}<br>Total asignado a familiares: {format_money(sum(r['family_cents'] for r in rows))}<br><b>Resultado personal previsto total {result_label(total)}: {format_money(abs(total))}</b></p>{EXPLANATION}")
         self.dashboard_result_details.setHtml(''.join(parts))
 
     def _refresh_owner_people(self, selected_id: str | None = None) -> None:
@@ -2365,7 +2951,7 @@ class MainWindow(QMainWindow):
             "Administra las personas de la base activa. Desactivar una persona "
             "conserva sus movimientos y deudas históricas."
         )
-        notice.setObjectName("demoBanner")
+        notice.setObjectName("secondaryText")
         notice.setWordWrap(True)
         layout.addWidget(notice)
         self.people_summary = QLabel(); self.people_summary.setWordWrap(True)
@@ -2376,8 +2962,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(editor)
 
         form = QGridLayout()
-        form.addWidget(QLabel("Nombre"), 0, 0)
+        form.addWidget(QLabel("Nombre *"), 0, 0)
         self.person_name = QLineEdit()
+        self.person_name.setAccessibleName('Nombre de la persona')
         self.person_name.setPlaceholderText("Nombre de la persona")
         form.addWidget(self.person_name, 0, 1)
         self.person_owner = QCheckBox("Es propietario")
@@ -2390,7 +2977,7 @@ class MainWindow(QMainWindow):
         self.create_person_button.setObjectName('primaryAction')
         self.create_person_button.clicked.connect(self._create_person)
         actions.addWidget(self.create_person_button, 0, 0)
-        self.update_person_button = QPushButton("Guardar cambios")
+        self.update_person_button = QPushButton("Guardar persona")
         self.update_person_button.clicked.connect(self._update_person)
         actions.addWidget(self.update_person_button, 0, 1)
         self.deactivate_person_button = QPushButton("Desactivar")
@@ -2533,7 +3120,7 @@ class MainWindow(QMainWindow):
         apply_warm_surface(page, 'warmOrders')
         root = QVBoxLayout(page)
         root.setContentsMargins(0, 0, 0, 0)
-        self.orders_scroll = QScrollArea()
+        self.orders_scroll = WarmScrollArea()
         self.orders_scroll.setWidgetResizable(True)
         self.orders_scroll.viewport().installEventFilter(self)
         content = QWidget()
@@ -2549,7 +3136,7 @@ class MainWindow(QMainWindow):
         heading.addWidget(title)
         heading.addStretch()
         outer.addLayout(heading)
-        toolbar = QHBoxLayout()
+        toolbar = FlowLayout()
         self.new_expense_button = QPushButton('Nuevo gasto')
         self.new_expense_button.setObjectName('primaryAction')
         self.new_expense_button.setIcon(line_icon('card', '#fffaf4'))
@@ -2559,7 +3146,6 @@ class MainWindow(QMainWindow):
         import_pdf.setIcon(line_icon('receipt'))
         import_pdf.clicked.connect(self._import_order_pdf)
         toolbar.addWidget(import_pdf)
-        toolbar.addStretch()
         outer.addLayout(toolbar)
         self.manual_dialog = QDialog(self)
         apply_warm_surface(self.manual_dialog, 'warmExpense')
@@ -2571,7 +3157,11 @@ class MainWindow(QMainWindow):
         self.manual_heading = QLabel('Nuevo gasto')
         self.manual_heading.setObjectName('pageTitle')
         dialog_root.addWidget(self.manual_heading)
-        scroll = QScrollArea(self.manual_dialog)
+        self.manual_action_notice = QLabel()
+        self.manual_action_notice.setObjectName('secondaryText')
+        self.manual_action_notice.setWordWrap(True)
+        dialog_root.addWidget(self.manual_action_notice)
+        scroll = WarmScrollArea(self.manual_dialog)
         self.manual_scroll = scroll
         scroll.viewport().installEventFilter(self)
         scroll.setWidgetResizable(True)
@@ -2582,7 +3172,7 @@ class MainWindow(QMainWindow):
         content.setObjectName('warmExpenseContent')
         layout.setSpacing(6)
         notice = QLabel(
-            "Un concepto por producto o servicio. Un solo cargo por gasto."
+            "* Campos obligatorios · Importes en MXN."
         )
         notice.setObjectName("secondaryText")
         notice.setWordWrap(True)
@@ -2590,26 +3180,32 @@ class MainWindow(QMainWindow):
 
         general = QFormLayout()
         self.order_merchant = QLineEdit()
+        self.order_merchant.setAccessibleName('Comercio de la compra, obligatorio')
         self.order_merchant.setPlaceholderText("Nombre del comercio")
         self.order_date = QLineEdit(date.today().isoformat())
+        self.order_date.setAccessibleName('Fecha de compra, AAAA-MM-DD')
+        self.order_date.setToolTip('Fecha de compra registrada; no es la fecha de corte ni el vencimiento.')
         self.order_institution = QComboBox()
         self.order_institution.currentIndexChanged.connect(self._refresh_order_instruments)
         self.order_instrument = QComboBox()
+        self.order_institution.setAccessibleName('Institución de la compra')
+        self.order_instrument.setAccessibleName('Cuenta o tarjeta de la compra')
         self.manual_information_grid = QGridLayout()
         self.manual_information_sections = []
         layout.addLayout(self.manual_information_grid)
-        for section_title, labels, widgets in [('01 · Información del gasto', ('Comercio', 'Fecha (AAAA-MM-DD)'), (self.order_merchant, self.order_date)),
-                                               ('02 · Medio de pago', ('Institución', 'Tarjeta / instrumento'), (self.order_institution, self.order_instrument))]:
-            section, section_body = warm_section(section_title)
-            basic = QGridLayout()
-            basic.setColumnStretch(0, 1)
-            basic.setColumnStretch(1, 1)
-            for column, (label, widget) in enumerate(zip(labels, widgets)):
-                basic.addWidget(QLabel(label), 0, column)
-                basic.addWidget(widget, 1, column)
-            section_body.addLayout(basic)
-            self.manual_information_sections.append(section)
-            self.manual_information_grid.addWidget(section, len(self.manual_information_sections)-1, 0)
+        section, section_body = warm_section('Datos del gasto')
+        basic = QGridLayout()
+        basic.setColumnStretch(1, 1)
+        basic.setColumnStretch(3, 1)
+        for row, pairs in enumerate(((('Comercio *', self.order_merchant), ('Fecha de compra *', self.order_date)),
+                                      (('Institución *', self.order_institution), ('Cuenta / tarjeta *', self.order_instrument)))):
+            for column, (text, field) in enumerate(pairs):
+                label = QLabel(text); label.setBuddy(field)
+                basic.addWidget(label, row * 2, column * 2, 1, 2)
+                basic.addWidget(field, row * 2 + 1, column * 2, 1, 2)
+        section_body.addLayout(basic)
+        self.manual_information_sections.append(section)
+        self.manual_information_grid.addWidget(section, 0, 0)
         general.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.order_purchase_mode = QComboBox()
         self.order_purchase_mode.addItem("Contado", "CASH")
@@ -2620,6 +3216,7 @@ class MainWindow(QMainWindow):
         self.order_installments.setRange(1, 60)
         self.order_installments.setValue(3)
         self.order_amount_basis = QComboBox()
+        self.order_amount_basis.setAccessibleName('Los importes capturados corresponden al total o a cada mensualidad')
         self.order_amount_basis.addItem('TOTAL de la compra', 'TOTAL')
         self.order_amount_basis.addItem('CADA MENSUALIDAD', 'INSTALLMENT')
         self.order_amount_basis.currentIndexChanged.connect(self._update_order_preview)
@@ -2633,32 +3230,33 @@ class MainWindow(QMainWindow):
         general.addRow(self.order_basis_note)
         self.order_basis_label = general.labelForField(self.order_amount_basis)
         self.order_first_due_date = QLineEdit()
+        self.order_first_due_date.setAccessibleName('Primer vencimiento MSI, AAAA-MM-DD, obligatorio para un plan nuevo')
         self.order_first_due_date.setPlaceholderText("AAAA-MM-DD; confirmar con institución")
         self.order_interest = MxnLineEdit()
         self.order_interest.setPlaceholderText("0.00")
         self.order_interest.textChanged.connect(self._update_order_preview)
         general.addRow("Número de cuotas", self.order_installments)
-        general.addRow("Vencimiento primera cuota", self.order_first_due_date)
-        general.addRow("Intereses del plan (MXN)", self.order_interest)
+        general.addRow("Vencimiento primera cuota *", self.order_first_due_date)
+        general.addRow("Intereses del plan (MXN, opcional)", self.order_interest)
         self.order_msi_labels = tuple(general.labelForField(w) for w in (
             self.order_installments, self.order_first_due_date, self.order_interest
         ))
         self._toggle_msi_fields()
-        modality, modality_body = warm_section('03 · Modalidad y mensualidades')
-        modality_body.addLayout(general)
-        layout.addWidget(modality)
+        section_body.addLayout(general)
 
         amounts = QGridLayout()
         self.order_original = MxnLineEdit()
         self.order_original.setPlaceholderText("5000.00")
         self.order_charged = MxnLineEdit()
+        self.order_original.setAccessibleName('Suma de los conceptos capturados en MXN')
+        self.order_charged.setAccessibleName('Cargo real capturado en MXN, obligatorio')
         self.order_charged.setPlaceholderText("5000.00")
         self.order_discount = QLabel("$0.00 MXN")
         self.order_exception = QLabel()
         self.order_exception.setWordWrap(True)
         amounts.addWidget(QLabel("Total de conceptos (MXN)"), 0, 0)
         amounts.addWidget(self.order_original, 1, 0)
-        amounts.addWidget(QLabel("Cargo real (MXN)"), 0, 1)
+        amounts.addWidget(QLabel("Cargo real (MXN) *"), 0, 1)
         amounts.addWidget(self.order_charged, 1, 1)
         self.order_discount_caption = QLabel('Descuento calculado')
         amounts.addWidget(self.order_discount_caption, 2, 0)
@@ -2672,6 +3270,7 @@ class MainWindow(QMainWindow):
         self.manual_expected_concepts = None
         self.manual_dialog.rejected.connect(self._cancel_manual_edit)
         self.manual_concepts = QTableWidget(0, 3)
+        self.manual_concepts.setAccessibleName('Conceptos: descripción, importe y persona o reparto compartido')
         self.manual_concepts.setHorizontalHeaderLabels(['Concepto', 'Importe (MXN)', 'Persona / Dividir'])
         self.manual_concepts.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.manual_concepts.setColumnWidth(0, 220)
@@ -2683,7 +3282,8 @@ class MainWindow(QMainWindow):
         self.manual_concepts.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         self.manual_concepts.setMinimumHeight(180)
         self.manual_concepts.verticalHeader().hide()
-        concept_section, concept_body = warm_section('04 · Conceptos y reparto')
+        concept_section, concept_body = warm_section('Conceptos y reparto')
+        self.manual_concept_section = concept_section
         concept_body.addWidget(self.manual_concepts)
         layout.addWidget(concept_section)
         concepts_actions = QHBoxLayout()
@@ -2694,7 +3294,7 @@ class MainWindow(QMainWindow):
         concepts_actions.addWidget(add_concept)
         concepts_actions.addWidget(remove_concept)
         concept_body.addLayout(concepts_actions)
-        summary_section, summary_body = warm_section('05 · Importes y validación')
+        summary_section, summary_body = warm_section('Importes y reparto que se guardarán')
         summary_body.addLayout(amounts)
         layout.addWidget(summary_section)
         self.manual_concepts.itemChanged.connect(self._update_manual_concepts)
@@ -2729,23 +3329,31 @@ class MainWindow(QMainWindow):
         self.order_summary.setObjectName("orderSummary")
         self.order_summary.setWordWrap(True)
         summary_body.addWidget(self.order_summary)
-        self.save_order_button = QPushButton("Guardar pedido")
+        self.save_order_button = QPushButton("Guardar gasto")
         self.save_order_button.setObjectName("primaryAction")
         self.save_order_button.clicked.connect(self._save_order)
         scroll.setWidget(content)
         dialog_root.addWidget(scroll, 1)
         footer = QHBoxLayout()
-        self.cancel_manual_button = QPushButton('Cancelar')
+        self.cancel_manual_button = QPushButton('Cerrar y conservar borrador')
         self.cancel_manual_button.clicked.connect(self.manual_dialog.reject)
+        self.manual_review_button = QPushButton('Resumen')
+        self.manual_review_button.setAccessibleName('Ir al resumen de importes y reparto, sin guardar')
+        self.manual_review_button.setToolTip('Revisa los importes y el reparto sin modificar la captura.')
+        self.manual_review_button.clicked.connect(lambda: self.manual_scroll.ensureWidgetVisible(summary_section))
+        footer.addWidget(self.manual_review_button)
         footer.addStretch()
         footer.addWidget(self.cancel_manual_button)
         footer.addWidget(self.save_order_button)
         self.save_order_button.setIcon(line_icon('receipt', '#fffaf4'))
         self.cancel_manual_button.setIcon(line_icon('receipt'))
         dialog_root.addLayout(footer)
+        QWidget.setTabOrder(self.manual_review_button, self.cancel_manual_button)
+        QWidget.setTabOrder(self.cancel_manual_button, self.save_order_button)
         layout = outer
 
         self.order_filter = QComboBox()
+        self.order_filter.setAccessibleName('Filtrar pedidos por estado')
         self.order_filter.addItem("Activos", "ACTIVE")
         self.order_filter.addItem("Anulados", "CANCELLED")
         self.order_filter.addItem("Todos", "ALL")
@@ -2771,12 +3379,16 @@ class MainWindow(QMainWindow):
         self.orders_table.setAlternatingRowColors(True)
         self.orders_table.setWordWrap(False)
         self.orders_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
+            QHeaderView.ResizeMode.ResizeToContents
         )
         for column in range(1, 8):
             self.orders_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.orders_table.itemSelectionChanged.connect(self._show_order_detail)
         layout.addWidget(self.orders_table)
+        self.orders_empty_notice = QLabel()
+        self.orders_empty_notice.setObjectName('secondaryText')
+        self.orders_empty_notice.setWordWrap(True)
+        layout.addWidget(self.orders_empty_notice)
         self.cancel_order_button = QPushButton("Anular pedido seleccionado")
         self.cancel_order_button.setObjectName('dangerAction')
         self.cancel_order_button.clicked.connect(self._cancel_selected_order)
@@ -2815,6 +3427,22 @@ class MainWindow(QMainWindow):
         detail_section, detail_body = warm_section('Detalle del pedido seleccionado')
         self.order_payment_identity = PaymentIdentity()
         detail_body.addWidget(self.order_payment_identity)
+        self.order_refund_tracking = QFrame()
+        self.order_refund_tracking.setObjectName('refundTracking')
+        tracking_body = QVBoxLayout(self.order_refund_tracking)
+        tracking_body.setContentsMargins(0, 4, 0, 6)
+        tracking_body.setSpacing(4)
+        tracking_title = QLabel('Seguimiento del reembolso')
+        tracking_title.setObjectName('sectionTitle')
+        self.order_refund_tracking_text = QLabel()
+        self.order_refund_tracking_text.setWordWrap(True)
+        self.order_refund_tracking_text.setTextFormat(Qt.TextFormat.RichText)
+        self.order_refund_tracking_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.order_refund_tracking_text.setAccessibleName('Seguimiento del reembolso registrado')
+        tracking_body.addWidget(tracking_title)
+        tracking_body.addWidget(self.order_refund_tracking_text)
+        self.order_refund_tracking.hide()
+        detail_body.addWidget(self.order_refund_tracking)
         detail_body.addWidget(self.order_detail)
         layout.addWidget(detail_section)
         layout.addStretch()
@@ -2833,6 +3461,12 @@ class MainWindow(QMainWindow):
     def _open_manual_expense(self):
         self._manual_started = True
         self.manual_heading.setText('Editar conceptos y reparto' if self.manual_edit_id else 'Nuevo gasto')
+        self.cancel_manual_button.setText('Descartar cambios' if self.manual_edit_id else 'Cerrar y conservar borrador')
+        self.save_order_button.setText('Guardar conceptos y reparto' if self.manual_edit_id else 'Guardar gasto')
+        self.manual_action_notice.setText(
+            'Cerrar descarta los cambios sin guardar. Las correcciones de cargo ya confirmadas se conservan.'
+            if self.manual_edit_id else
+            'Al cerrar, este borrador se conserva mientras Valenza siga abierta.')
         available = self.screen().availableGeometry()
         self.manual_dialog.resize(min(760, available.width() - 32), min(580, available.height() - 64))
         if self.manual_edit_id:
@@ -2990,7 +3624,8 @@ class MainWindow(QMainWindow):
             return
         self.order_charged.setText(f"{Decimal(new) / 100:.2f}")
         self.data_changed.emit('orders')
-        self._show_information('Cargo corregido con auditoría. El reparto se conserva; los cambios de conceptos aún no guardados permanecen en el borrador.')
+        self.manual_action_notice.setText('Cargo real guardado. Los cambios de conceptos y reparto siguen sin guardar; cerrar solo descarta estos últimos.')
+        self._show_information('Cargo real corregido; se conservaron el reparto y los pagos.')
         return True
 
     def _import_order_pdf(self) -> None:
@@ -3003,6 +3638,7 @@ class MainWindow(QMainWindow):
             draft = read_receipt(Path(path))
             if ImportPreview(self.repository, draft, self).exec():
                 self._refresh_visible_data()
+                self._show_information('Pedido importado y guardado.')
         except (ValueError, RuntimeError, OSError) as error:
             self._show_error(self._safe_error(error))
 
@@ -3027,6 +3663,8 @@ class MainWindow(QMainWindow):
             self.order_instrument.addItem(brand_icon(self.order_institution.currentText(), "institution"), str(item["alias"]), item["id"])
 
     def _show_order_detail(self) -> None:
+        self.order_refund_tracking.hide()
+        self.order_refund_tracking_text.clear()
         self.accredit_refund_button.setEnabled(False)
         self.repurchase_button.setEnabled(False)
         self.repurchase_button.setText('Lo compré de nuevo')
@@ -3041,7 +3679,7 @@ class MainWindow(QMainWindow):
         if order is None:
             return
         lines = [
-            f"{order['merchant']} · {order['ordered_at']}",
+            f"{order['merchant']} · {date_label(order['ordered_at'])}",
             "\n1. Compra original y descuento",
             f"Original: {format_money(order['original_cents'])}",
             f"Descuento personal (incluido en el cargo): {format_money(order['discount_cents'])}",
@@ -3101,10 +3739,22 @@ class MainWindow(QMainWindow):
             if any(r.get('repurchase') for r in order['product_refunds']):
                 self.repurchase_button.setText('Editar reparto devolución/recompra')
         comparison = self.repository.order_benefit_summary(order_id)
+        from valenza.gui.refund_tracking import refund_tracking_html
+        refund_source = (order if comparison['original_order_id'] == order_id else
+                         self.repository.get_order(comparison['original_order_id']))
+        if refund_source:
+            linked_orders = {r['repurchase']['order_id']: self.repository.get_order(r['repurchase']['order_id'])
+                             for r in refund_source.get('product_refunds', []) if r.get('repurchase')}
+            tracking = refund_tracking_html(refund_source, linked_orders)
+            if comparison['original_order_id'] != order_id and tracking:
+                tracking = 'Reembolso del pedido original relacionado.<br>' + tracking
+            if tracking:
+                self.order_refund_tracking_text.setText(tracking)
+                self.order_refund_tracking.show()
         if not evidence:
             lines.extend(['\n2. Devolución, recompra y compensación', 'Sin devolución de producto registrada.'])
         if comparison['original_order_id'] != order_id:
-            lines.append(f"Recompra vinculada al pedido {comparison['original_order_id']}; "
+            lines.append(f"Recompra vinculada a {refund_source['merchant'] if refund_source else 'compra original'} · {date_label(refund_source['ordered_at']) if refund_source else 'fecha por consultar'}; "
                          "financiada con el reembolso, sin otro cobro familiar.")
         lines.extend(["\n3. Participaciones y abonos", 'Participaciones originales:', *original_participations,
                       "Comparación de la operación completa (incluye recompra vinculada):"])
@@ -3134,7 +3784,7 @@ class MainWindow(QMainWindow):
         identity = self._table_id(self.orders_table,8)
         order = self.repository.get_order(identity) if identity else None
         if not order or order['order_status']!='ACTIVE': return
-        dialog,body,save = self._financial_dialog('MSI del pedido existente')
+        dialog,body,save = self._financial_dialog('MSI del pedido existente', save_text='Vincular plan MSI')
         notice = QLabel(f"{order['merchant']} · cargo original {format_money(order['charged_cents'])}. Este plan no crea otro cargo ni otro cobro familiar. Pagos bancarios y abonos familiares permanecen independientes.")
         notice.setWordWrap(True); body.addWidget(notice)
         error = QLabel(); error.setWordWrap(True)
@@ -3161,14 +3811,22 @@ class MainWindow(QMainWindow):
                 except (ValueError,*DATABASE_ERRORS) as exc:
                     error.setText(self._safe_error(exc)); save.setEnabled(True); return
                 dialog.accept(); self.data_changed.emit('msi')
+                self._show_information('Plan MSI vinculado al pedido.')
             save.clicked.connect(persist)
         else:
             save.setText('Cerrar'); save.clicked.connect(dialog.accept)
+            # Closing remains available through this button, Escape and the title bar.
+            dialog.cancel_button.hide()
+            saved_notice = QLabel('Cada fecha o ajuste se guarda al aplicarlo. Cerrar no deshace los cambios guardados.')
+            saved_notice.setWordWrap(True); body.addWidget(saved_notice)
+            feedback = QLabel(); feedback.setObjectName('actionFeedback'); feedback.setWordWrap(True)
+            body.addWidget(feedback)
             table = QTableWidget(0,5); table.setHorizontalHeaderLabels(['Cuota','Fecha','Previsto','Pago aplicado','Pendiente'])
             table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch)
+            table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents)
+            table.setItemDelegateForColumn(1, RecordedDateDelegate(table))
             table.setMinimumHeight(150); body.addWidget(table)
             total = QLabel(); total.setWordWrap(True); body.addWidget(total)
             records = []
@@ -3179,16 +3837,21 @@ class MainWindow(QMainWindow):
                     values=[item['number'],item['due_date'] or 'Por confirmar',format_money(item['principal_cents']+item['interest_cents']),format_money(item['applied_cents']),format_money(item['remaining_cents'])]
                     for column,value in enumerate(values): table.setItem(row,column,QTableWidgetItem(str(value)))
                 total.setText(f"Saldo de cuotas previsto: {format_money(sum(i['remaining_cents'] for i in records))}. Solo los pagos bancarios realmente registrados y aplicados cubren estas cuotas. El saldo real de la tarjeta se consulta en Tarjetas.")
+                from valenza.finance.monthly import month_totals
+                buckets = month_totals([dict(due_date=i['due_date'], amount_cents=i['remaining_cents']) for i in records], self._forecast_date())
+                total.setText(total.text() + f"\nPeriodo de vencimiento {self._forecast_date():%Y-%m}: {format_money(buckets['current_cents'])} · Meses futuros: {format_money(buckets['future_cents'])} · Anteriores: {format_money(buckets['overdue_cents'])} · Sin fecha: {format_money(buckets['undated_cents'])}. Previsión; no es el pago confirmado del banco.")
             refresh()
             date_button = QPushButton('Editar fecha de la cuota seleccionada'); body.addWidget(date_button)
             def correct_date():
+                feedback.clear()
                 row = table.currentRow()
                 if row<0: error.setText('Selecciona una cuota.'); return
-                value,ok = QInputDialog.getText(dialog,'Fecha de vencimiento','Fecha AAAA-MM-DD:',text=records[row]['due_date'] or '')
+                value,ok = QInputDialog.getText(dialog,'Guardar fecha de cuota','Fecha AAAA-MM-DD (se guarda al aceptar):',text=records[row]['due_date'] or '')
                 if not ok: return
                 try: self.repository.correct_installment_due_date(installment_id=records[row]['id'],due_date=value)
                 except (ValueError,*DATABASE_ERRORS) as exc: error.setText(self._safe_error(exc)); return
                 error.clear(); refresh(); self.data_changed.emit('msi')
+                feedback.setText('Fecha de cuota guardada.')
             date_button.clicked.connect(correct_date)
             adjustment = self._money_input(sum(i['remaining_cents'] for i in records))
             reason = QLineEdit(); reason.setPlaceholderText('Motivo: devolución o corrección confirmada')
@@ -3196,10 +3859,12 @@ class MainWindow(QMainWindow):
             form.addRow('Nuevo saldo previsto',adjustment); form.addRow('Motivo',reason); body.addLayout(form)
             adjust = QPushButton('Aplicar ajuste solo a cuotas previstas'); body.addWidget(adjust)
             def apply_adjustment():
+                feedback.clear()
                 adjust.setEnabled(False)
                 try: self.repository.adjust_msi_remaining(identity,self._read_mxn(adjustment),reason.text())
                 except (ValueError,*DATABASE_ERRORS) as exc: error.setText(self._safe_error(exc)); adjust.setEnabled(True); return
                 error.clear(); refresh(); self.data_changed.emit('msi'); adjust.setEnabled(True)
+                feedback.setText('Ajuste de cuotas previstas guardado.')
             adjust.clicked.connect(apply_adjustment)
             explanation = QLabel('Un ajuste de previsión no acredita dinero ni cambia repartos. Las devoluciones reales siguen registrándose con destino y estado en el pedido.')
             explanation.setWordWrap(True); body.addWidget(explanation); body.addWidget(error)
@@ -3219,8 +3884,11 @@ class MainWindow(QMainWindow):
         if not accepted:
             return
         from valenza.gui.pdf_import import RefundRepurchaseDialog
-        RefundRepurchaseDialog(self.repository, refunds[choices.index(selection)], self).exec()
+        refund = refunds[choices.index(selection)]
+        result = RefundRepurchaseDialog(self.repository, refund, self).exec()
         self._refresh_visible_data()
+        if result:
+            self._show_information('Reparto de devolución y recompra guardado.' if refund.get('repurchase') else 'Recompra guardada.')
 
     def _confirm_pending_product_refund(self) -> None:
         order_id = self._table_id(self.orders_table, 8)
@@ -3249,6 +3917,7 @@ class MainWindow(QMainWindow):
             self._show_error(self._safe_error(error))
             return
         self._refresh_visible_data()
+        self._show_information('Devolución acreditada.')
 
     def _edit_order_merchant(self) -> None:
         order_id = self._table_id(self.orders_table, 8)
@@ -3802,6 +4471,7 @@ class MainWindow(QMainWindow):
                 self.repository.update_manual_concepts(self.manual_edit_id, self._read_manual_concepts(),
                     expected_concepts=self.manual_expected_concepts)
                 self.data_changed.emit('orders')
+                self._show_saved_information('Conceptos y reparto guardados.', 'Pedidos: '+order['merchant']+' · '+date_label(order['ordered_at'])+' · detalle del pedido.')
                 self.manual_dialog.accept()
                 self._clear_order_form()
                 return
@@ -3865,7 +4535,7 @@ class MainWindow(QMainWindow):
             self._order_save_in_progress = False
             self._update_order_preview()
         self.data_changed.emit("orders")
-        self._show_information("Pedido guardado correctamente.")
+        self._show_saved_information("Gasto guardado.", 'Pedidos: '+merchant_widget.text().strip()+' · '+date_label(date_widget.text().strip())+' · detalle del pedido.')
         self.manual_dialog.accept()
         self._clear_order_form()
 
@@ -3957,6 +4627,8 @@ class MainWindow(QMainWindow):
             if str(order["id"]) == selected_id:
                 self.orders_table.selectRow(row)
         blocker.unblock()
+        self.orders_empty_notice.setText('No hay pedidos en este filtro. Cambia el filtro, registra un gasto o importa un comprobante.')
+        self.orders_empty_notice.setVisible(self.orders_table.rowCount() == 0)
         self._show_order_detail()
         self._reflow_orders()
 
@@ -4440,19 +5112,41 @@ class MainWindow(QMainWindow):
     def _person_error(error: Exception) -> str:
         if "uq_person_normalized_name" in str(error) or "UNIQUE constraint" in str(error):
             return "Ya existe una persona con ese nombre."
-        return str(error)
+        return user_error(error)
 
     def _show_error(self, message: str) -> None:
+        self.statusBar().clearMessage()
+        if hasattr(self, 'action_feedback'):
+            self.action_feedback.clear()
+            self.action_feedback.hide()
         QMessageBox.critical(self, "No se pudo completar la operación", message)
 
     @staticmethod
     def _safe_error(error):
-        if isinstance(error, DATABASE_ERRORS):
-            return 'No se pudo completar la operación de almacenamiento. Conserva la captura, revisa el diagnóstico y vuelve a intentarlo.'
-        return str(error)
+        return user_error(error)
 
-    def _show_information(self, message: str) -> None:
+    def _show_saved_information(self, message, location):
+        self._show_information(message)
+        self.action_feedback.setText(message+'\nDónde encontrarlo: '+location)
+        self.action_feedback.show()
+
+    def _show_information(self, message: str, *, location: str | None = None) -> None:
         self.statusBar().showMessage(message, 10000)
+        if hasattr(self, 'action_feedback'):
+            index = self.pages.currentIndex()
+            page = self.PAGES[index] if 0 <= index < len(self.PAGES) else 'Cobros'
+            destination = {
+                'Pedidos': 'Pedidos: selecciona el comercio para ver su detalle.',
+                'Cobros': 'Cobros: consulta el abono en Ver historial.',
+                'Tarjetas': 'Tarjetas: selecciona la cuenta; pagos en Pagos reales e historial, cuentas en Administración bancaria y consultas en Ver historial de consultas.',
+                'Suscripciones': 'Suscripciones: selecciona el servicio para consultar sus datos.',
+                'Usuarios': 'Usuarios: selecciona la persona en la lista.',
+                'Configuración': 'Configuración: consulta Mostrar resultados.',
+            }.get(page, 'Consulta el registro en su sección de origen.')
+            destination = location or destination
+            saved = any(word in message.casefold() for word in ('guardad', 'registrad', 'actualiz', 'cread', 'corregid', 'vinculad', 'aplicad', 'generad'))
+            self.action_feedback.setText(message + ('\nDónde encontrarlo: '+destination if saved else ''))
+            self.action_feedback.show()
 
     def _make_dashboard(self) -> QWidget:
         page = QWidget()
@@ -4483,22 +5177,46 @@ class MainWindow(QMainWindow):
         if not logo.isNull():
             self.dashboard_brand.setPixmap(logo.scaled(180, 45, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             header.addWidget(self.dashboard_brand)
+        self.dashboard_brand.hide()  # The sidebar already displays the application logo.
         self.dashboard_brand.setToolTip('Valenza · Finanzas compartidas')
         title = QLabel("Inicio")
         title.setObjectName("pageTitle")
         header.addWidget(title)
         self.dashboard_period = QLabel()
         header.addWidget(self.dashboard_period)
-        header.addStretch()
+        self.dashboard_period.hide()
+        self.dashboard_period_picker = self._make_period_picker()
+        self.dashboard_period_picker.setAccessibleName('Mes de compromisos y programación en Inicio; no filtra los saldos actuales')
+        self.dashboard_period_picker.setToolTip('Mes de compromisos y programación. Los saldos actuales y acumulados no se filtran por este selector.')
+        period_control = QWidget()
+        period_layout = QVBoxLayout(period_control)
+        period_layout.setContentsMargins(0,0,0,0)
+        period_layout.setSpacing(0)
+        period_caption = QLabel('Mes de compromisos')
+        period_caption.setObjectName('secondaryText')
+        period_caption.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
+        period_caption.setBuddy(self.dashboard_period_picker)
+        period_layout.addWidget(period_caption)
+        period_layout.addWidget(self.dashboard_period_picker)
+        header.addWidget(period_control)
+        self.dashboard_heading.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.dashboard_header_actions = QWidget()
-        access_layout = QHBoxLayout(self.dashboard_header_actions)
+        access_layout = FlowLayout(self.dashboard_header_actions)
         access_layout.setContentsMargins(0, 0, 0, 0)
+        self.prepare_payment_button = QPushButton('Revisar efectivo')
+        self.prepare_payment_button.setEnabled(self.repository is not None)
+        self.prepare_payment_button.clicked.connect(self._prepare_month_payment)
+        access_layout.addWidget(self.prepare_payment_button)
         for caption, destination in [('Pedidos', 'Pedidos'), ('Cobros', 'Cobros'), ('Tarjetas', 'Tarjetas')]:
             button = QPushButton(caption)
             button.clicked.connect(lambda checked=False, name=destination: self._show_page(self.PAGES.index(name)))
             access_layout.addWidget(button)
         self.dashboard_header_grid.addWidget(self.dashboard_heading, 0, 0)
         self.dashboard_header_grid.addWidget(self.dashboard_header_actions, 0, 1)
+        self.dashboard_scope_note = QLabel('Mes seleccionado: compromisos, calendario y gráfica mensual. Los pendientes totales, descuentos y resultado son actuales o acumulados; no son saldos históricos del mes.')
+        self.dashboard_scope_note.setWordWrap(True)
+        self.dashboard_scope_note.setObjectName('secondaryText')
+        layout.addWidget(self.dashboard_scope_note)
         banner = QLabel(
             "MODO DEMOSTRACIÓN · Los importes son sintéticos y no se guardan."
             if self.repository is None else
@@ -4508,8 +5226,7 @@ class MainWindow(QMainWindow):
         )
         banner.setWordWrap(True)
         title.setToolTip(banner.text())
-        if self.repository is None or self.test_mode:
-            header.insertWidget(2, QLabel('Demostración' if self.repository is None else 'Base de pruebas'))
+        # Demo/test status is already displayed by the window banner.
 
         cards = QGridLayout()
         self.dashboard_indicator_grid = cards
@@ -4518,12 +5235,12 @@ class MainWindow(QMainWindow):
         self.dashboard_debt = self._make_card("Compromisos del mes · tarjetas", "")
         self.dashboard_debt.setObjectName('monthCommitments')
         self.dashboard_debt.layout().itemAt(0).widget().setText('Compromisos del mes · tarjetas')
-        self.dashboard_debt.setToolTip('Importes registrados del mes según fechas capturadas. Incluyen responsabilidades personales y familiares; no representan exclusivamente mi deuda personal ni un estado bancario confirmado.')
+        self.dashboard_debt.setToolTip('Deuda pendiente menos MSI futuros, cuotas anteriores y cuotas sin fecha, con mínimo cero por tarjeta. Los pagos bancarios ya están descontados.')
         self.dashboard_discount = self._make_card("Descuentos personales", "")
-        self.dashboard_msi = self._make_card('MSI del mes', '')
+        self.dashboard_msi = self._make_card('Deuda total pendiente', '')
         for widget, kind, color in ((self.dashboard_personal, 'people', '#cc785c'),
                                      (self.dashboard_receivables, 'people', '#8ca99a'),
-                                     (self.dashboard_msi, 'calendar', '#8bafc2'),
+                                     (self.dashboard_msi, 'card', '#8bafc2'),
                                      (self.dashboard_discount, 'card', '#c29668')):
             caption = widget.layout().itemAt(0).widget()
             caption_layout = QHBoxLayout()
@@ -4539,13 +5256,17 @@ class MainWindow(QMainWindow):
         cards.addWidget(self.dashboard_msi, 0, 2)
         cards.addWidget(self.dashboard_discount, 0, 3)
         layout.addLayout(cards)
+        self.dashboard_balance_scope = QLabel('Saldos actuales: mi parte, cobros familiares y deuda total. Acumulados de pedidos activos: descuentos y resultado personal previsto.')
+        self.dashboard_balance_scope.setWordWrap(True)
+        self.dashboard_balance_scope.setObjectName('secondaryText')
+        layout.addWidget(self.dashboard_balance_scope)
         self.dashboard_monthly_installments = QLabel()
         self.dashboard_monthly_installments.setWordWrap(True)
         self.dashboard_summary_details = QWidget()
         summary_layout = QVBoxLayout(self.dashboard_summary_details)
         summary_layout.setContentsMargins(0, 0, 0, 0)
         summary_layout.addWidget(self.dashboard_monthly_installments)
-        self.dashboard_discount.setToolTip("Ahorro personal de pedidos activos; ya incluido en sus cargos. No es dinero cobrado.")
+        self.dashboard_discount.setToolTip("Ahorro acumulado del propietario en pedidos activos; ya considerado en el costo efectivo. No es dinero cobrado.")
         self.dashboard_credit = QLabel()
         layout.addWidget(self.dashboard_credit)
         self.dashboard_unclassified = QLabel()
@@ -4558,11 +5279,11 @@ class MainWindow(QMainWindow):
             label.setWordWrap(True)
             if label is self.dashboard_expected:
                 expected_row.addWidget(label, 1)
-                summary_layout.addLayout(expected_row)
+                layout.addLayout(expected_row)
             else:
                 summary_layout.addWidget(label)
         self.dashboard_expected.setToolTip('Resultado de pedidos activos antes de abonos personales. Incluye cada recompra vinculada una vez; excluye intereses y comisiones. No es dinero cobrado.')
-        self.dashboard_summary_toggle = QPushButton('Detalles financieros')
+        self.dashboard_summary_toggle = QPushButton('Ver desglose')
         self.dashboard_summary_toggle.setCheckable(True)
         self.dashboard_summary_toggle.toggled.connect(self.dashboard_summary_details.setVisible)
         principal_amount = self.dashboard_debt.findChild(QLabel, 'summaryAmount')
@@ -4573,12 +5294,22 @@ class MainWindow(QMainWindow):
         self.dashboard_debt.layout().addLayout(principal_row)
         self.dashboard_debt.layout().setContentsMargins(6, 4, 6, 4)
         period_note = QLabel('Periodo actual · según fechas capturadas; no es la deuda total de todos los meses.')
+        self.dashboard_period_note = period_note
         period_note.setObjectName('secondaryText')
         period_note.setWordWrap(True)
         self.dashboard_debt.layout().addWidget(period_note)
+        self.dashboard_month_accounts = QLabel()
+        self.dashboard_month_accounts.setWordWrap(True)
+        self.dashboard_month_accounts.setTextFormat(Qt.TextFormat.PlainText)
+        self.dashboard_debt.layout().addWidget(self.dashboard_month_accounts)
         self.dashboard_summary_details.hide()
         layout.addWidget(self.dashboard_summary_details)
-        self.dashboard_result_toggle = QPushButton('Ver cálculo personal')
+        self.dashboard_privacy = QPushButton('👁 Mostrar importes')
+        self.dashboard_privacy.setCheckable(True)
+        self.dashboard_privacy.setAccessibleName('Mostrar importes personales')
+        self.dashboard_privacy.toggled.connect(self._toggle_personal_privacy)
+        expected_row.addWidget(self.dashboard_privacy)
+        self.dashboard_result_toggle = QPushButton('Ver cómo se calcula')
         self.dashboard_result_toggle.setToolTip('Desglose del resultado previsto: si se cobra todo a familiares, antes de abonos personales.')
         self.dashboard_result_toggle.setCheckable(True)
         self.dashboard_result_toggle.setEnabled(self.repository is not None)
@@ -4592,11 +5323,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.dashboard_result_details)
         self.dashboard_charts_grid = QGridLayout()
         self.dashboard_bar_chart = FinanceChart('bars')
-        self.dashboard_donut_chart = FinanceChart('donut')
-        self.dashboard_charts_grid.addWidget(self.dashboard_bar_chart, 0, 0)
-        self.dashboard_charts_grid.addWidget(self.dashboard_donut_chart, 0, 1)
+        self.dashboard_donut_chart = PeopleMonthChart()
+        self.dashboard_donut_chart.monthStep.connect(
+            lambda step: self.dashboard_period_picker.setDate(self.dashboard_period_picker.date().addMonths(step)))
+        self.dashboard_donut_chart.personSelected.connect(self._select_chart_person)
+        self.dashboard_donut_chart.detailsRequested.connect(lambda label: self._select_chart_person(label, details=True))
+        self.dashboard_charts_grid.addWidget(self.dashboard_bar_chart, 0, 0, 1, 2)
+        self.dashboard_charts_grid.addWidget(self.dashboard_donut_chart, 1, 0, 1, 2)
         layout.addLayout(self.dashboard_charts_grid)
-        self.dashboard_donut_chart.setToolTip('Distribución de pendientes personales y familiares. La deuda bancaria no se añade; sus responsabilidades ya están representadas. Las participaciones sin clasificar se muestran aparte.')
+        self.dashboard_donut_chart.setToolTip('Pendiente registrado de cada persona, igual que en la tabla. No incluye previsiones ni añade la deuda bancaria.')
         calendar_header = QHBoxLayout()
         calendar_caption = QLabel('Mensualidades · cuotas por mes')
         calendar_caption.setWordWrap(True)
@@ -4620,7 +5355,7 @@ class MainWindow(QMainWindow):
         card_layout = QVBoxLayout(self.dashboard_card_section)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_header = QHBoxLayout()
-        card_header.addWidget(QLabel('Deudas por tarjeta · mes actual'))
+        card_header.addWidget(QLabel('Conciliación bancaria · cuentas'))
         card_header.addStretch()
         self.dashboard_bank_toggle = QPushButton('Detalle bancario')
         self.dashboard_bank_toggle.setCheckable(True)
@@ -4628,18 +5363,18 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(card_header)
         self.dashboard_cards = QTableWidget(0, 6)
         self.dashboard_cards.setHorizontalHeaderLabels(['Tarjeta / institución', 'Deuda total Valenza', 'Deuda total banco', 'Consultado', 'Diferencia'])
-        self.dashboard_cards.horizontalHeaderItem(1).setText('Deuda del mes actual')
+        self.dashboard_cards.horizontalHeaderItem(1).setText('Deuda total actual Valenza')
         self.dashboard_cards.setHorizontalHeaderItem(5, QTableWidgetItem('Total pendiente'))
-        for column, explanation in ((1, 'Compromisos del mes según fechas capturadas.'),
+        for column, explanation in ((1, 'Deuda total actual calculada, incluye principal MSI futuro.'),
                                      (2, 'Saldo total consultado manualmente al banco; no es un compromiso mensual.'),
-                                     (4, 'Diferencia entre saldo total del banco y deuda total calculada por Valenza.'),
+                                     (4, 'Diferencia histórica contra la deuda fotografiada al guardar, no contra la deuda actual.'),
                                      (5, 'Deuda completa registrada, incluidas mensualidades futuras.')):
             self.dashboard_cards.horizontalHeaderItem(column).setToolTip(explanation)
-        self.dashboard_cards.setHorizontalHeaderItem(2, QTableWidgetItem('Total consultado banco'))
-        self.dashboard_cards.horizontalHeaderItem(2).setToolTip('Saldo total consultado al banco; distinto del importe mensual.')
+        self.dashboard_cards.setHorizontalHeaderItem(2, QTableWidgetItem('Último saldo banco'))
+        self.dashboard_cards.setHorizontalHeaderItem(4, QTableWidgetItem('Diferencia histórica'))
+        self.dashboard_cards.horizontalHeaderItem(2).setToolTip('Saldo manual de la última consulta; su tipo aparece indicado si no equivale a deuda total.')
         self.dashboard_bank_toggle.toggled.connect(self._toggle_dashboard_bank_details)
-        for column in (2, 3, 4):
-            self.dashboard_cards.setColumnHidden(column, True)
+        self.dashboard_cards.setColumnHidden(5, True)
         self.dashboard_cards.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.dashboard_cards.setAlternatingRowColors(True)
         self.dashboard_cards.verticalHeader().hide()
@@ -4650,13 +5385,19 @@ class MainWindow(QMainWindow):
         self.dashboard_cards_total = QLabel()
         self.dashboard_cards_total.setWordWrap(True)
         card_layout.addWidget(self.dashboard_cards_total)
+        self.dashboard_bank_notes=QLabel()
+        self.dashboard_bank_notes.setWordWrap(True)
+        self.dashboard_bank_notes.hide()
+        card_layout.addWidget(self.dashboard_bank_notes)
 
         person_actions = QGridLayout()
         self.dashboard_person_header = person_actions
         self.dashboard_person_section = QWidget()
         person_layout = QVBoxLayout(self.dashboard_person_section)
         person_layout.setContentsMargins(0, 0, 0, 0)
-        person_actions.addWidget(QLabel('Deudas por persona · MXN'), 0, 0)
+        person_title = QLabel('Deuda total por persona · MXN')
+        person_title.setObjectName('sectionTitle')
+        person_actions.addWidget(person_title, 0, 0)
         details = QPushButton('Ver desglose')
         self.dashboard_person_toggle = details
         details.setCheckable(True)
@@ -4665,8 +5406,10 @@ class MainWindow(QMainWindow):
         person_actions.addWidget(details, 0, 1); person_actions.addWidget(self.dashboard_person_pdf, 0, 2)
         person_layout.addLayout(person_actions)
         self.dashboard_people = QTableWidget(0,6)
-        self.dashboard_people.setHorizontalHeaderLabels(['Persona','Pendiente','Abonado','Suscr. prev.','MSI próx.*','ID'])
+        self.dashboard_people.setHorizontalHeaderLabels(['Persona','Pendiente','Abonado','Suscr. prev.','MSI por fecha','ID'])
         self.dashboard_people.setColumnHidden(5,True)
+        self.dashboard_people.setColumnHidden(3,True)
+        self.dashboard_people.setColumnHidden(4,True)
         self.dashboard_people.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.dashboard_people.setAlternatingRowColors(True)
         self.dashboard_people.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -4680,7 +5423,7 @@ class MainWindow(QMainWindow):
             self.dashboard_people.setColumnWidth(column,85)
         self.dashboard_people.verticalHeader().hide()
         self.dashboard_people.verticalHeader().setDefaultSectionSize(26)
-        self.dashboard_people.setToolTip('* MSI próximo está incluido en el pendiente real. No se suma otra vez. Suscripción prevista todavía no crea deuda.')
+        self.dashboard_people.setToolTip('MSI: V = meses vencidos, M = mes seleccionado, F = meses futuros. Ya incluidos en el pendiente; no se suman otra vez. Suscripción prevista todavía no crea deuda.')
         self.dashboard_people.itemSelectionChanged.connect(self._show_person_statement)
         person_layout.addWidget(self.dashboard_people)
         self.dashboard_people_total = QLabel(); self.dashboard_people_total.setWordWrap(True)
@@ -4713,6 +5456,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.dashboard_movements)
         layout.addStretch()
         for button in page.findChildren(QPushButton):
+            if button is self.dashboard_privacy:
+                continue
             label = button.text()
             icon = ('calendar' if 'calendario' in label else 'people' if label in ('Cobros', 'Ver desglose')
                     else 'card' if label in ('Tarjetas', 'Detalle bancario', 'Detalles financieros') else 'receipt')
@@ -4751,10 +5496,14 @@ class MainWindow(QMainWindow):
                 )
         else:
             summary = self.repository.dashboard_summary()
+            summary['bank_comparisons'] = self.repository.list_bank_comparisons(as_of=self._forecast_date())
+            self._dashboard_forecast_accounts = summary['bank_comparisons']
+            home_month = home_month_summary(self.repository, summary['bank_comparisons'], self._forecast_date())
+            summary['scheduled_month_cents'] = home_month['msi_month_cents']
             self.dashboard_monthly_installments.setText(
                 f"Suma de cuotas MSI previstas este mes: {format_money(summary['scheduled_month_cents'])}. "
-                'Incluidas en la deuda total; no se suman otra vez. Previsión según fechas capturadas.')
-            monthly_collections = self.repository.collection_monthly_summaries()
+                f"Periodo {self._forecast_date():%Y-%m}. Incluidas en la deuda total; no se suman otra vez. Previsión según fechas capturadas.")
+            monthly_collections = self.repository.collection_monthly_summaries(as_of=self._forecast_date())
             family_ids = {item['receivable_id'] for item in self.repository.list_collection_items()
                           if item['participant_role'] == 'FAMILY'}
             family_msi = [value for key, value in monthly_collections.items()
@@ -4762,7 +5511,8 @@ class MainWindow(QMainWindow):
             self.dashboard_monthly_installments.setText(
                 self.dashboard_monthly_installments.text()
                 + '\nMSI por cobrar a familiares este mes: '
-                + format_money(sum(value['current_cents'] for value in family_msi)))
+                + format_money(sum(value['current_cents'] for value in family_msi))
+                + '\n' + home_month_text(home_month, format_money))
             net_pending = int(summary['personal_pending_less_discounts_cents'])
             expected = int(summary['personal_expected_result_cents'])
             received = int(summary['family_received_cents'])
@@ -4770,14 +5520,14 @@ class MainWindow(QMainWindow):
                 row = self.dashboard_cards.rowCount()
                 self.dashboard_cards.insertRow(row)
                 values = [f"{comparison['alias']} · {comparison['institution_name']}",
-                          format_money(comparison['current_month_cents']),
-                          format_money(comparison['reported_cents']) if comparison['reported_cents'] is not None else 'Sin consultar',
-                          comparison['consulted_at'] or 'Sin consultar',
-                          format_money(comparison['difference_cents']) if comparison['difference_cents'] is not None else 'Sin consultar',
+                          format_money(comparison['calculated_cents']),
+                          reported_text(comparison['last_query'],format_money),
+                          comparison['consulted_at'] or 'Sin consulta',
+                          difference_text(comparison['difference_cents'],format_money) if comparison['last_query'] else 'Sin consulta',
                           format_money(comparison['calculated_cents'])]
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(value)
-                    item.setToolTip(value)
+                    item.setToolTip(query_text(comparison['last_query'],format_money)+'\n'+' '.join(comparison['warnings']))
                     if column in (1, 2, 4, 5):
                         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     if column == 0:
@@ -4786,7 +5536,7 @@ class MainWindow(QMainWindow):
             discount = int(summary['discount_benefit_cents'])
             personal = int(summary["personal_pending_cents"])
             receivables = int(summary["receivables_cents"])
-            debt = sum(int(item['current_month_cents']) for item in summary['bank_comparisons'])
+            debt = home_month['current_cents']
             credit = int(summary["credit_cents"])
             self.dashboard_credit.setText(
                 f"Saldo a favor registrado: {format_money(credit)}" if credit else ""
@@ -4798,7 +5548,7 @@ class MainWindow(QMainWindow):
             for item in summary["recent_movements"]:
                 state = " · Anulado" if item["status"] == "CANCELLED" else ""
                 self.dashboard_movements.addItem(
-                    f"{str(item['occurred_at'])[:10]} · {item['kind']} · "
+                    f"{date_label(str(item['occurred_at'])[:10])} · {item['kind']} · "
                     f"{item['description']} · {format_money(int(item['amount_cents']))}{state}"
                 )
                 movement = self.dashboard_movements.item(self.dashboard_movements.count() - 1)
@@ -4812,16 +5562,38 @@ class MainWindow(QMainWindow):
         self.dashboard_month_commitments = debt
         self.dashboard_discount.findChild(QLabel, 'summaryAmount').setText(format_money(discount))
         self.dashboard_msi.findChild(QLabel, 'summaryAmount').setText(
-            format_money(int(summary['scheduled_month_cents'])) if self.repository else format_money(0))
-        self.dashboard_donut_chart.set_data([('Mi parte', personal), ('Familiares', receivables)])
+            format_money(sum(c['calculated_cents'] for c in summary['bank_comparisons'])) if self.repository else format_money(debt))
+        self.dashboard_msi.setToolTip('Deuda bancaria total pendiente: incluye las cuotas de todos los meses. No se suma al importe mensual.')
+        if not self.repository:
+            self.dashboard_donut_chart.set_data([('Mi parte', personal), ('Familiares', receivables)], 'Mi parte')
         months = ('Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre')
-        today = date.today()
+        today = self._forecast_date()
         self.dashboard_period.setText(f'{months[today.month - 1]} {today.year}')
+        if self.repository:
+            self.dashboard_period_note.setText(f"{period_label(home_month['period'])} · No sustituye el pago informado por el banco."
+                + ('\nSaldos pendientes actuales; no es un saldo histórico.'
+                   if today.strftime('%Y-%m') != date.today().strftime('%Y-%m') else ''))
+            history = self.repository.list_bank_reconciliation_history()
+            account_lines = []
+            for account, restored_account in zip(summary['bank_comparisons'],home_month['accounts']):
+                account_lines.append(f"{account['alias']}: {format_money(restored_account['current_cents'])}")
+                official = official_period_query(history,account,home_month['period'])
+                if official:
+                    account_lines.append(official_text(official,format_money,compact=True))
+            self.dashboard_month_accounts.setText('\n'.join(account_lines))
+            self.dashboard_month_accounts.setToolTip('\n\n'.join(a['alias']+'\n'+home_month_text(dict(a,period=home_month['period']),format_money) for a in home_month['accounts']))
         self.dashboard_net_pending.setText(f'Mi parte pendiente menos descuentos: {format_money(net_pending)} · comparación, sin modificar deudas.')
-        self.dashboard_expected.setText(f"Resultado personal previsto {'a favor' if expected >= 0 else 'a mi cargo'}: {format_money(abs(expected))} · antes de abonos personales.")
+        self.dashboard_expected.setText(f"Resultado personal previsto {result_label(expected)}: {format_money(abs(expected))} · antes de abonos personales.")
+        if not self.dashboard_privacy.isChecked():
+            self.dashboard_discount.findChild(QLabel, 'summaryAmount').setText('••••')
+            self.dashboard_expected.setText('Resultado personal previsto: ••••')
+            self.dashboard_net_pending.setText('Comparación personal: importes ocultos')
+            self.dashboard_result_details.setPlainText('Importes personales ocultos. ' + EXPLANATION)
         self._fit_dashboard_table(self.dashboard_cards)
         self.dashboard_received.setText(f'Abonos familiares realmente recibidos: {format_money(received)} · descuentos = ahorro; resultado previsto ≠ dinero cobrado.')
-        self.dashboard_cards_total.setText(f'Deuda registrada del mes actual: {format_money(debt)} · según las fechas capturadas.')
+        bank_total=sum(c['calculated_cents'] for c in summary['bank_comparisons']) if self.repository else 0
+        self.dashboard_cards_total.setText(f'Deuda bancaria total calculada: {format_money(bank_total)} · cada cuenta / línea una vez. Diferencias históricas a la fecha de consulta; no se comparan con la deuda actual.')
+        self.dashboard_bank_notes.setText('\n\n'.join(c['alias']+' · '+query_text(c['last_query'],format_money)+'\n'+' '.join(c['warnings']) for c in summary['bank_comparisons']) if self.repository else 'Sin consulta')
         self.dashboard_credit.setVisible(bool(self.dashboard_credit.text()))
         self.dashboard_unclassified.setVisible(bool(self.dashboard_unclassified.text()))
         if self.dashboard_result_toggle.isChecked():
@@ -4834,6 +5606,48 @@ class MainWindow(QMainWindow):
     def _refresh_people_dashboard(self):
         selected = self._table_id(self.dashboard_people,5)
         people = self.repository.people_debt_summary() if self.repository else []
+        msi_by_person = {}
+        if self.repository:
+            shares = self.repository.list_collection_items()
+            periods = self.repository.collection_monthly_summaries(as_of=self._forecast_date())
+            for share in shares:
+                buckets = periods[share['receivable_id']]
+                if buckets['is_msi']:
+                    totals = msi_by_person.setdefault(share['user_id'], dict(overdue_cents=0,current_cents=0,future_cents=0,undated_cents=0))
+                    for key in totals: totals[key] += buckets[key]
+        if self.repository:
+            chart_people = sorted(people, key=lambda person: not person['is_owner'])
+            chart_period = self._forecast_date().strftime('%Y-%m')
+            from valenza.gui.home_people_month import people_month_breakdown
+            chart_breakdown = people_month_breakdown(self.repository, self._forecast_date())
+            self._dashboard_chart_breakdown = chart_breakdown
+            person_month = chart_breakdown['amounts']
+            chart_values = [(('Mi parte · ' if p['is_owner'] else '') + p['name'], person_month.get(p['id'], 0))
+                            for p in chart_people]
+            self._dashboard_chart_people = {label: p['id'] for (label, _), p in zip(chart_values, chart_people)}
+            owner_label = next((label for (label, _), person in zip(chart_values, chart_people)
+                                if person['is_owner']), '')
+            self.dashboard_donut_chart.set_data(chart_values, owner_label, period=chart_period)
+            self.dashboard_donut_chart.empty.setText(
+                'Hay pendientes sin fecha o calendario. Revisa el detalle antes de interpretar el total.'
+                if chart_breakdown['warnings'] else 'Sin pendientes en este mes')
+            if chart_breakdown['warnings']:
+                self.dashboard_donut_chart.total.setText(self.dashboard_donut_chart.total.text()
+                                                       + '\nImporte incompleto: hay fechas o calendarios por revisar.')
+            self.dashboard_donut_chart.setToolTip(
+                'Compras normales pendientes hasta el mes seleccionado y solo las cuotas MSI de ese mes, después de abonos. '
+                'No incluye compras posteriores ni MSI futuros o anteriores. Usa saldos actuales; no reconstruye saldos históricos. '
+                'No es el pago solicitado por el banco.\n'
+                + '\n'.join(chart_breakdown['warnings']) + '\n'
+                + self.dashboard_donut_chart.toolTip())
+            for label, person in zip((label for label, _ in chart_values), chart_people):
+                detail = '\n'.join(f"{s['source_name']} · {s['basis']}: {format_money(s['amount_cents'])}"
+                                   for s in chart_breakdown['sources'].get(person['id'], []))
+                chart_row = self.dashboard_donut_chart.rows.get(label)
+                if chart_row is not None:
+                    chart_row.setToolTip(chart_row.accessibleName() + ('\n' + detail if detail else ''))
+            self.dashboard_donut_chart.setAccessibleName('Pendiente por persona · ' + period_label(chart_period))
+            self.dashboard_donut_chart.setAccessibleDescription(self.dashboard_donut_chart.toolTip())
         with QSignalBlocker(self.dashboard_people):
             self.dashboard_people.setRowCount(0)
             for person in people:
@@ -4841,8 +5655,14 @@ class MainWindow(QMainWindow):
                 values = [person['name']+(' (Yo)' if person['is_owner'] else ''),format_money(person['remaining_cents']),
                     format_money(person['paid_cents']),format_money(person['subscription_forecast_cents']),
                     format_money(person['next_msi_cents']),person['id']]
+                buckets = msi_by_person.get(person['id'], {})
+                values[4] = ' · '.join(label+' '+format_money(buckets.get(key,0)) for label,key in
+                    (('V','overdue_cents'),('M','current_cents'),('F','future_cents')))
                 for column,value in enumerate(values):
                     item = QTableWidgetItem(str(value)); item.setToolTip(str(value))
+                    if column == 4:
+                        item.setToolTip('MSI pendientes por mes seleccionado: vencidos / actuales / futuros.\n'+str(value)
+                            +'\nSin fecha: '+format_money(buckets.get('undated_cents',0))+'. No se suman al pendiente otra vez.')
                     if column in (1, 2, 3, 4):
                         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     if column == 0:
@@ -4857,6 +5677,13 @@ class MainWindow(QMainWindow):
         own = sum(p['remaining_cents'] for p in people if p['is_owner'])
         family = sum(p['remaining_cents'] for p in people if not p['is_owner'])
         self.dashboard_people_total.setText(f'Mi pendiente: {format_money(own)} · Otras personas: {format_money(family)} · Total registrado: {format_money(own+family)}. Previsiones excluidas del total.')
+        for column in range(1, 5):
+            metrics = self.dashboard_people.fontMetrics()
+            width = metrics.horizontalAdvance(self.dashboard_people.horizontalHeaderItem(column).text()) + 24
+            for row in range(self.dashboard_people.rowCount()):
+                item = self.dashboard_people.item(row, column)
+                width = max(width, metrics.horizontalAdvance(item.text().removesuffix(' MXN')) + 20)
+            self.dashboard_people.setColumnWidth(column, width)
         self._fit_dashboard_table(self.dashboard_people)
         self._show_person_statement()
         if self.dashboard_person_toggle.isChecked():
@@ -4881,8 +5708,7 @@ class MainWindow(QMainWindow):
                              + (table.horizontalScrollBar().sizeHint().height() if horizontal else 0))
 
     def _toggle_dashboard_bank_details(self, checked):
-        for column in (2, 3, 4):
-            self.dashboard_cards.setColumnHidden(column, not checked)
+        self.dashboard_bank_notes.setVisible(checked)
         self._fit_dashboard_table(self.dashboard_cards)
 
     def _compact_dashboard_movements(self, *_):
@@ -4902,8 +5728,10 @@ class MainWindow(QMainWindow):
             item.widget().hide()
             item.widget().deleteLater()
         self.dashboard_calendar_cards = []
-        entries = self.repository.upcoming_bank_installments() if self.repository else []
-        today = date.today()
+        accounts = getattr(self, '_dashboard_forecast_accounts', []) if self.repository else []
+        entries = [dict(e,alias=a['alias'],requires_review=not e['confirmed'])
+                   for a in accounts for e in a['monthly_forecast']['entries'] if e['kind']=='MSI']
+        today = self._forecast_date()
         periods = {}
         for offset in range(3):
             index = today.year * 12 + today.month - 1 + offset
@@ -4924,7 +5752,7 @@ class MainWindow(QMainWindow):
             elif key == 'Sin fecha':
                 caption = 'Sin fecha · por confirmar'
             elif key < current:
-                caption += ' · vencidas'
+                caption += ' · anteriores por confirmar' if any(e.get('requires_review') for e in group) else ' · vencidas según calendario'
             else:
                 caption += ' · futuras'
             card = self._make_card(caption, format_money(sum(int(e['amount_cents']) for e in group)))
@@ -4937,40 +5765,39 @@ class MainWindow(QMainWindow):
             card.layout().setContentsMargins(6, 4, 6, 4)
             card.layout().itemAt(0).widget().setText(f'{caption} · {len(group)} cuota(s)')
             unconfirmed = any(e.get('requires_review') for e in group)
-            status_note = QLabel('Previsión · calendario por confirmar' if unconfirmed else 'Previsión según fechas capturadas' if group else 'Sin cuotas previstas')
+            status_note = QLabel('Programado antes de pagos · calendario por confirmar' if unconfirmed else 'Programado antes de pagos' if group else 'Sin cuotas previstas')
             status_note.setObjectName('secondaryText')
             status_note.setWordWrap(True)
             card.layout().addWidget(status_note)
             card.setToolTip('\n'.join(f"{e['alias']} · {e['merchant']} · cuota {e['number']} · {format_money(e['amount_cents'])}" + (' · calendario por confirmar' if e.get('requires_review') else '') for e in group) or 'Sin cuotas previstas.')
             self.dashboard_calendar_cards.append(card)
-        chart_keys = [key for key in sorted(periods) if key >= current and key != 'Sin fecha'][:6]
-        chart_values = [(key, self.dashboard_month_commitments if key == current else
-                         sum(int(e['amount_cents']) for e in periods[key])) for key in chart_keys]
+        # Restore the original future bars: pending bank installments only,
+        # not the newer Cards forecast of normal purchases and extra charges.
+        chart_periods = {}
+        for offset in range(3):
+            index = today.year*12+today.month-1+offset
+            chart_periods[f'{index//12:04d}-{index%12+1:02d}'] = 0
+        for entry in self.repository.upcoming_bank_installments() if self.repository else []:
+            if entry['due_date']:
+                key = entry['due_date'][:7]
+                chart_periods[key] = chart_periods.get(key,0)+entry['amount_cents']
+        chart_keys = [key for key in sorted(chart_periods) if key>=current][:6]
+        chart_values = [(key,self.dashboard_month_commitments if key==current else chart_periods[key]) for key in chart_keys]
         self.dashboard_bar_chart.set_data(chart_values, current)
-        self.dashboard_bar_chart.setToolTip('Mes actual: compromisos registrados en tarjetas, iguales a la tarjeta principal. Meses futuros: cuotas MSI con fecha capturada; no incluye cargos futuros sin registrar.\n' + self.dashboard_bar_chart.toolTip())
+        self.dashboard_bar_chart.setToolTip('Mes seleccionado: mismo pendiente que el indicador principal. Meses futuros: solo MSI pendientes. Usa saldos actuales; no reconstruye saldos históricos.\n' + self.dashboard_bar_chart.toolTip())
         total = sum(int(e['amount_cents']) for e in entries)
-        self.dashboard_calendar_total.setText(f'Saldo total pendiente MSI: {format_money(total)} · incluye todos los periodos; no se suma a los compromisos del mes.')
+        self.dashboard_calendar_total.setText(f'MSI programados vigentes: {format_money(total)} · Pendiente conocido actualmente: {format_money(sum(e["remaining_cents"] for e in entries))}. Incluye todos los periodos; no se suma otra vez al mes.')
         self._reflow_dashboard()
 
     def _reflow_dashboard(self):
         if not hasattr(self, 'dashboard_tables_grid'):
             return
         width = self.dashboard_scroll.viewport().width()
-        if hasattr(self, 'dashboard_brand'):
-            logo_file = 'logo_horizontal.png'
-            logo = QPixmap(str(Path(__file__).parent / 'assets' / logo_file))
-            if not logo.isNull():
-                self.dashboard_brand.setPixmap(logo.scaled(180 if width >= 740 else 120, 45 if width >= 740 else 30,
-                    Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         for widget in (self.dashboard_bar_chart, self.dashboard_donut_chart):
             self.dashboard_charts_grid.removeWidget(widget)
-        self.dashboard_charts_grid.addWidget(self.dashboard_bar_chart, 0, 0)
-        self.dashboard_charts_grid.addWidget(self.dashboard_donut_chart, 0 if width >= 800 else 1, 1 if width >= 800 else 0)
-        for widget in (self.dashboard_heading, self.dashboard_header_actions):
-            self.dashboard_header_grid.removeWidget(widget)
-        self.dashboard_header_grid.addWidget(self.dashboard_heading, 0, 0)
-        self.dashboard_header_grid.addWidget(self.dashboard_header_actions, 0 if width >= 740 else 1, 1 if width >= 740 else 0)
-        self.dashboard_header_grid.setColumnStretch(0, 1)
+        self.dashboard_charts_grid.addWidget(self.dashboard_bar_chart, 0, 0, 1, 2)
+        self.dashboard_charts_grid.addWidget(self.dashboard_donut_chart, 1, 0, 1, 2)
+        self._reflow_dashboard_header(width)
         columns = 4 if width >= 1000 else 2 if width >= 560 else 1
         for index, widget in enumerate((self.dashboard_personal, self.dashboard_receivables, self.dashboard_msi, self.dashboard_discount)):
             self.dashboard_indicator_grid.removeWidget(widget)
@@ -4991,6 +5818,33 @@ class MainWindow(QMainWindow):
         self.dashboard_tables_grid.addWidget(self.dashboard_person_section, 0 if wide else 1, 1 if wide else 0)
         self.dashboard_tables_grid.setColumnStretch(1, 1 if wide else 0)
 
+    def _reflow_dashboard_header(self, viewport_width):
+        """Give the action flow its complete row width, rather than its largest button."""
+        grid = self.dashboard_header_grid
+        actions = self.dashboard_header_actions
+        flow = actions.layout()
+        buttons = [flow.itemAt(i).widget() for i in range(flow.count())]
+        row_width = sum(button.sizeHint().width() for button in buttons) + flow.spacing() * (len(buttons)-1)
+        margins = self.dashboard_scroll.widget().layout().contentsMargins()
+        available = max(0, viewport_width - margins.left() - margins.right())
+        heading_width = self.dashboard_heading.minimumSizeHint().width()
+        gap = max(0, grid.horizontalSpacing())
+        inline = heading_width + gap + row_width <= available
+        for widget in (self.dashboard_heading, actions):
+            grid.removeWidget(widget)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        actions.setMinimumWidth(row_width if inline else 0)
+        if inline:
+            grid.addWidget(self.dashboard_heading, 0, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            grid.addWidget(actions, 0, 1, Qt.AlignmentFlag.AlignVCenter)
+            action_width = available - heading_width - gap
+        else:
+            grid.addWidget(self.dashboard_heading, 0, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(actions, 1, 0, 1, 2)
+            action_width = available
+        actions.setFixedHeight(flow.heightForWidth(max(1, action_width)))
+
     def eventFilter(self, watched, event):
         if hasattr(self, 'cards_scroll') and watched is self.cards_scroll.viewport() and event.type() == QEvent.Type.Resize:
             self._fit_card_tables()
@@ -5006,9 +5860,24 @@ class MainWindow(QMainWindow):
             self._reflow_dashboard()
         return super().eventFilter(watched, event)
 
+    def _prepare_month_payment(self):
+        from valenza.gui.cash_review import CashReviewDialog
+        dialog = CashReviewDialog(self.repository, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            instrument_id = dialog.card.currentData()
+            self._show_page(self.PAGES.index('Tarjetas'))
+            index = self.card_instrument.findData(instrument_id)
+            if index >= 0:
+                self.card_instrument.setCurrentIndex(index)
+        dialog.deleteLater()
+
     def _show_person_statement(self):
         identity = self._table_id(self.dashboard_people,5)
         self.dashboard_person_pdf.setEnabled(bool(identity))
+        label = next((label for label, person_id in getattr(self, '_dashboard_chart_people', {}).items()
+                      if person_id == identity), None)
+        if label is not None:
+            self.dashboard_donut_chart.select_person(label, emit=False)
 
     def _toggle_person_breakdown(self, checked):
         if checked:
@@ -5016,12 +5885,23 @@ class MainWindow(QMainWindow):
                 self.repository.people_debt_summary() if self.repository else [],
                 self.repository.list_collection_items() if self.repository else [])
         self.dashboard_person_details.setVisible(checked)
+        for column in (3, 4):
+            self.dashboard_people.setColumnHidden(column, not checked)
+        self._fit_dashboard_table(self.dashboard_people)
 
     def _select_breakdown_person(self, identity):
         for row in range(self.dashboard_people.rowCount()):
             if self.dashboard_people.item(row, 5).text() == identity:
                 self.dashboard_people.selectRow(row)
                 break
+
+    def _select_chart_person(self, label, *, details=False):
+        identity = getattr(self, '_dashboard_chart_people', {}).get(label)
+        if identity:
+            self._select_breakdown_person(identity)
+            if details:
+                self.dashboard_person_toggle.setChecked(True)
+                self.dashboard_scroll.ensureWidgetVisible(self.dashboard_person_section)
 
     @staticmethod
     def _make_card(label: str, value: str) -> QFrame:
@@ -5032,9 +5912,95 @@ class MainWindow(QMainWindow):
         caption.setWordWrap(True)
         amount = QLabel(value)
         amount.setObjectName("summaryAmount")
+        amount.setWordWrap(True)
+        amount.setMinimumWidth(0)
+        amount.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(caption)
         layout.addWidget(amount)
         return card
+
+    def _open_search(self):
+        if self.repository is None:
+            return
+        if self._search_dialog is not None:
+            self._search_dialog.raise_()
+            self._search_dialog.input.setFocus()
+            return
+        dialog = SearchDialog(self.repository, self)
+        self._search_dialog = dialog
+        dialog.recordActivated.connect(self._open_search_result)
+        dialog.finished.connect(lambda: setattr(self, '_search_dialog', None))
+        dialog.open()
+
+    @staticmethod
+    def _search_select(table, column, identity):
+        table.clearSelection()
+        for row in range(table.rowCount()):
+            if table.item(row, column).text() == identity:
+                table.selectRow(row)
+                table.scrollToItem(table.item(row, column))
+                table.setFocus()
+                return True
+        return False
+
+    def _open_search_result(self, result):
+        kind, identity = result['kind'], result['id']
+        tables = {'order': 'order_record', 'purchase': 'purchase', 'person': 'person',
+                  'card': 'payment_instrument', 'bank_payment': 'institution_payment', 'receipt': 'user_payment'}
+        if kind not in tables:
+            return
+        try:
+            record = self.repository.database.connection.execute(
+                'SELECT ' + ('id,instrument_id' if kind == 'bank_payment' else 'id')
+                + ' FROM ' + tables[kind] + ' WHERE id=?', (identity,)).fetchone()
+            if record is None:
+                self._show_information('El registro ya no está disponible.')
+                return
+            page = {'order': 'Pedidos', 'purchase': 'Cobros', 'person': 'Usuarios',
+                    'card': 'Tarjetas', 'bank_payment': 'Tarjetas', 'receipt': 'Cobros'}[kind]
+            if kind in ('purchase','receipt'):self._remember_collection_draft()
+            self.navigation.setCurrentRow(self.PAGES.index(page))
+            selected = False
+            if kind == 'order':
+                self.order_filter.setCurrentIndex(self.order_filter.findData('ALL'))
+                self._refresh_orders()
+                selected = self._search_select(self.orders_table, 8, identity)
+            elif kind == 'person':
+                selected = self._search_select(self.people_table, 0, identity)
+            elif kind in ('card', 'bank_payment'):
+                card_id = identity if kind == 'card' else record['instrument_id']
+                selected = self._search_select(self.cards_table, 12, card_id)
+                if kind == 'bank_payment' and selected:
+                    self.card_panels['payments'][0].setChecked(True)
+                    selected = self._search_select(self.card_payment_history, 4, identity)
+                    self.cards_scroll.ensureWidgetVisible(self.card_payment_history)
+            elif kind == 'receipt':
+                self.collection_filter.setCurrentIndex(self.collection_filter.findData('ALL'))
+                self.collection_history_toggle.setChecked(True)
+                self._refresh_collections()
+                selected = self._search_select(self.collection_history, 6, identity)
+                self.collections_scroll.ensureWidgetVisible(self.collection_history)
+            elif kind == 'purchase':
+                self._refresh_collection_items()
+                entries=[entry for entry in self.repository.list_collection_items() if entry['source_id']==identity and entry['source_kind']=='Compra histórica']
+                selected=next((self._search_select(self.collection_items,7,e['receivable_id']) for e in entries
+                    if any(self.collection_items.item(r,7).text()==e['receivable_id'] for r in range(self.collection_items.rowCount()))),False)
+                if not selected and entries:
+                    self.collection_filter.setCurrentIndex(self.collection_filter.findData('ALL'))
+                    selected=self._search_select(self.collection_items,7,entries[0]['receivable_id'])
+                if selected:
+                    self.collection_mode_notice.setText('Consultando participaciones de '+str(entries[0]['source_name'])+' · '+date_label(entries[0]['source_date'])+
+                        '. Personas: '+', '.join(e['user_name'] for e in entries)+'. Selecciona una participación para preparar un abono.')
+                    self.collection_return_button.show()
+                    self.collections_scroll.ensureWidgetVisible(self.collection_items)
+                else:
+                    self._return_to_collection_draft()
+                    self._show_information('Esta compra no tiene participaciones disponibles para consultar.')
+                    return
+            if not selected:
+                self._show_information('Se abrió la sección. El registro no está disponible en esta vista.')
+        except DATABASE_ERRORS as error:
+            self._show_error(self._safe_error(error))
 
     def _show_page(self, index: int) -> None:
         if 0 <= index < self.pages.count():
@@ -5176,6 +6142,7 @@ class MainWindow(QMainWindow):
         self.record_collection_button.setEnabled(
             account is not None and 0 < amount <= int(account["remaining_cents"])
             and not self._collection_receipt_in_progress
+            and not self._consulting_receipt
         )
         try:
             apply_amount = self._parse_mxn_to_cents(self.card_apply_amount.text())
@@ -5237,7 +6204,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if self.database is not None and self.database.encrypted and not self.test_mode and getattr(self, '_manual_started', False):
             dirty = bool(self.order_merchant.text().strip()) or any(self.manual_concepts.item(r, 0).text().strip() for r in range(self.manual_concepts.rowCount()))
-            if dirty and QMessageBox.question(self, 'Captura sin guardar', 'Hay un gasto sin guardar. ¿Cerrar y descartarlo?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            if dirty and QMessageBox.question(self, 'Captura sin guardar', '¿Cerrar Valenza y descartar la captura sin guardar? Los cambios ya guardados se conservan.', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
         if self.database is not None:

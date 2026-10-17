@@ -98,3 +98,6 @@ Desktop.ini
 /output/
 /tmp/
 /logos/*.png
+/artifacts/
+/corte-*.json
+/preparacion-*.json

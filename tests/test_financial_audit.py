@@ -100,7 +100,10 @@ def test_msi_projects_original_debt_without_second_charge(audited_repo):
     repo.record_bank_balance('card', 94932, '2026-10-11')
     after = repo.dashboard_summary()
     assert after['institutional_balance_cents'] == before['institutional_balance_cents']
-    assert after['bank_comparisons'][0]['difference_cents'] == 0
+    assert after['bank_comparisons'][0]['difference_cents'] is None  # Date-only consultation is not contemporaneous.
+    from datetime import datetime
+    repo.record_bank_balance('card',94932,datetime.now().astimezone().isoformat())
+    assert repo.dashboard_summary()['bank_comparisons'][0]['difference_cents'] == 0
 
 
 def test_missing_manual_charge_requires_review():
@@ -130,7 +133,6 @@ def test_historical_purchase_has_different_summary_scope(audited_repo):
     assert summary['institutional_balance_cents'] == summary['personal_expected_result_cents'] == 0
 
 
-@pytest.mark.xfail(strict=True, reason='Proposed correction: collection balances must also filter cancelled payments')
 def test_cancelled_payment_with_unreversed_legacy_application_is_not_a_receipt(audited_repo):
     repo = audited_repo
     order(repo, 'legacy-receipt', 10000, 10000, 10000)
@@ -141,3 +143,43 @@ def test_cancelled_payment_with_unreversed_legacy_application_is_not_a_receipt(a
     statement = repo.family_statement('mama')
     assert statement['rows'][0]['receipts'] == []
     assert statement['paid_cents'] == 0
+    before = repo.database.connection.total_changes
+    issues = repo.receipt_inconsistencies()
+    assert len(issues) == 1 and issues[0]['payment_id'] == 'legacy-cash'
+    assert repo.database.connection.total_changes == before
+    assert repo.database.connection.execute(
+        "SELECT application_status FROM receipt_application WHERE payment_id='legacy-cash'"
+    ).fetchone()[0] == 'ACTIVE'  # Diagnose, never silently repair.
+
+
+def test_legacy_cancelled_application_does_not_block_valid_new_receipt_or_edit(audited_repo):
+    repo=audited_repo
+    order(repo,'legacy-validation',10000,10000,10000)
+    account='order:legacy-validation:mama'
+    repo.record_receipt(payment_id='cancelled-legacy',receivable_id=account,amount_cents=1000,received_at='2026-10-11')
+    repo.database.connection.execute("UPDATE user_payment SET payment_status='CANCELLED' WHERE id='cancelled-legacy'")
+    repo.record_receipt(payment_id='valid-new',receivable_id=account,amount_cents=10000,received_at='2026-10-12')
+    repo.update_user_payment('valid-new',amount_cents=9000,received_at='2026-10-12')
+    repo.update_user_payment('valid-new',amount_cents=10000,received_at='2026-10-12')
+    assert repo.family_statement('mama')['paid_cents']==10000
+    assert repo.family_statement('mama')['remaining_cents']==0
+    assert repo.database.connection.execute("SELECT application_status FROM receipt_application WHERE payment_id='cancelled-legacy'").fetchone()[0]=='ACTIVE'
+    assert len(repo.receipt_inconsistencies())==1
+
+
+@pytest.mark.parametrize('operation',['apply','cancel_order'])
+def test_legacy_cancelled_application_is_ignored_by_other_receipt_guards(audited_repo,operation):
+    repo=audited_repo
+    order(repo,'legacy-guard',10000,10000,10000)
+    account='order:legacy-guard:mama'
+    repo.record_receipt(payment_id='cancelled-guard',receivable_id=account,amount_cents=1000,received_at='2026-10-11')
+    repo.database.connection.execute("UPDATE user_payment SET payment_status='CANCELLED' WHERE id='cancelled-guard'")
+    if operation=='apply':
+        repo.add_user_payment('active-guard','mama','2026-10-12',10000)
+        repo.apply_receipt('active-guard',account,10000)
+        assert repo.family_statement('mama')['remaining_cents']==0
+    else:
+        repo.cancel_order('legacy-guard',reason='Synthetic explicit cancellation')
+        assert repo.get_order('legacy-guard')['order_status']=='CANCELLED'
+    assert repo.database.connection.execute("SELECT application_status FROM receipt_application WHERE payment_id='cancelled-guard'").fetchone()[0]=='ACTIVE'
+    assert len(repo.receipt_inconsistencies())==1

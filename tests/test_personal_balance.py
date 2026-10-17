@@ -46,11 +46,11 @@ def test_bank_queries_are_metadata_only_and_newest_consultation_wins(repository)
     assert all(item['reported_cents'] is None for item in initial['bank_comparisons'])
     repository.record_bank_balance('card', 55000, '2026-10-11')
     reported = next(item for item in repository.list_bank_comparisons() if item['instrument_id'] == 'card')
-    assert reported['calculated_cents'] == 54258 and reported['difference_cents'] == 742
+    assert reported['calculated_cents'] == 54258 and reported['difference_cents'] is None
     repository.record_bank_balance('card', 70000, '2026-10-10')
     assert next(item for item in repository.list_bank_comparisons() if item['instrument_id'] == 'card')['reported_cents'] == 55000
     repository.record_bank_balance('card', 0, '2026-10-11')
-    assert next(item for item in repository.list_bank_comparisons() if item['instrument_id'] == 'card')['difference_cents'] == -54258
+    assert next(item for item in repository.list_bank_comparisons() if item['instrument_id'] == 'card')['difference_cents'] is None
     for table in tables:
         assert [tuple(row) for row in connection.execute(f'SELECT * FROM {table} ORDER BY rowid')] == before[table]
     after = repository.dashboard_summary()
@@ -96,28 +96,33 @@ def test_compact_home_bank_query_and_manual_form(repository, monkeypatch, tmp_pa
     window.resize(820, 520)
     window.show()
     app.processEvents()
+    assert '$' not in window.dashboard_net_pending.text()
+    window.dashboard_privacy.click()
     assert '$338.71 MXN' in window.dashboard_net_pending.text()
     assert '$379.93 MXN' in window.dashboard_expected.text()
     assert '$0.00 MXN' in window.dashboard_received.text()
     assert window.dashboard_debt.findChild(QLabel, 'summaryAmount').text() == '$1,141.58 MXN'
+    assert 'No sustituye el pago informado por el banco' in window.dashboard_period_note.text()
     assert window.dashboard_cards.rowCount() == 2
-    assert all(window.dashboard_cards.item(row, 2).text() == 'Sin consultar' for row in range(2))
+    assert all(window.dashboard_cards.item(row, 2).text() == 'Sin consulta' for row in range(2))
     window.grab().save(str(tmp_path / 'personal-home-small.png'))
     window._show_page(4)
     row = next(row for row in range(window.cards_table.rowCount()) if window.cards_table.item(row, 12).text() == 'card')
     window.cards_table.selectRow(row)
+    window.bank_query_type.setCurrentIndex(window.bank_query_type.findData('TOTAL'))
+    window.bank_total_confirmed.setChecked(True)
     window.bank_query_amount.setText('550.00')
     window.bank_query_date.setText('2026-10-11')
     window.bank_query_save.click()
     app.processEvents()
-    assert not errors and '$7.42 MXN' in window.bank_query_comparison.text()
+    assert not errors and not window.bank_query_amount.text()
     assert window.cards_table.item(row, 13).text() == '$550.00 MXN'
-    assert window.cards_table.item(row, 15).text() == '$7.42 MXN'
+    assert '$7.42 MXN' in window.cards_table.item(row, 15).text()
     assert window.cards_table.item(row, 4).text() == '$542.58 MXN'
     window.grab().save(str(tmp_path / 'bank-comparison.png'))
     window._show_page(0)
     home_row = next(row for row in range(window.dashboard_cards.rowCount()) if '$542.58' in window.dashboard_cards.item(row, 1).text())
-    assert window.dashboard_cards.item(home_row, 4).text() == '$7.42 MXN'
+    assert '$7.42 MXN' in window.dashboard_cards.item(home_row, 4).text()
     window.resize(1100, 680)
     app.processEvents()
     window.grab().save(str(tmp_path / 'personal-home.png'))

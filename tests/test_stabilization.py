@@ -178,6 +178,8 @@ def test_main_screens_and_manual_scroll_render_small(repository, tmp_path, monke
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Yes)
     app=create_application([])
     font=QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
     if font>=0: app.setFont(QFont(QFontDatabase.applicationFontFamilies(font)[0], 10))
@@ -198,6 +200,8 @@ def test_main_screens_and_manual_scroll_render_small(repository, tmp_path, monke
             window.grab().save(str(tmp_path/f'{name}-{width}.png'))
     window._show_page(0)
     window.dashboard_result_toggle.click()
+    assert '$' not in window.dashboard_result_details.toPlainText()
+    window.dashboard_privacy.setChecked(True)
     assert '$379.93 MXN' in window.dashboard_result_details.toPlainText()
     window._show_page(4)
     row=next(r for r in range(window.cards_table.rowCount()) if window.cards_table.item(r,12).text()=='card')

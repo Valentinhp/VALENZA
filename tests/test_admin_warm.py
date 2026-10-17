@@ -38,7 +38,7 @@ def test_encrypted_admin_selection_and_empty_forecasts(tmp_path, monkeypatch):
     assert window.maintenance_result.isVisible()
     def invalid_save(dialog):
         dialog.show(); app.processEvents()
-        next(b for b in dialog.findChildren(QPushButton) if b.text() == 'Guardar').click()
+        next(b for b in dialog.findChildren(QPushButton) if b.text() in ('Crear suscripción', 'Guardar suscripción')).click()
         assert dialog.isVisible()
         dialog.reject()
         return QDialog.DialogCode.Rejected

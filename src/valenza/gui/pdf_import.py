@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from uuid import uuid4
-from PySide6.QtCore import Signal, Qt
+from datetime import date
+from calendar import monthrange
+from PySide6.QtCore import Signal, Qt, QSignalBlocker
 from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout, QBoxLayout, QLineEdit, QLabel,
                               QSizePolicy, QHeaderView,
-                              QLayout,
+                              QLayout, QSpinBox,
                               QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QCheckBox, QMessageBox, QScrollArea, QTextEdit)
 from valenza.ocr.order_import import money, validate, RECEIPT_FIELD_NAMES
 from valenza.persistence.database import DATABASE_ERRORS
 from valenza.finance.refund_repurchase import refund_repurchase_amounts
 from valenza.gui.warm_finance import apply_warm_surface, FinancialSummary, line_icon
 from valenza.gui.branding import brand_icon
-from valenza.gui.design_system import WarmScrollArea
+from valenza.gui.design_system import WarmScrollArea, FlowLayout
 
 
 def pesos(cents):
@@ -28,22 +30,38 @@ class ProductAssignment(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         controls = QHBoxLayout()
         self.person = QComboBox()
+        self.person.setAccessibleName('Persona responsable del concepto')
+        self.person.setToolTip('Elige una persona o usa Dividir para repartir el importe.')
         for person in people:
             self.person.addItem('Yo' if person['is_owner'] else str(person['name']), str(person['id']))
         self.person.setCurrentIndex(next((i for i, p in enumerate(people) if p['is_owner']), -1))
         controls.addWidget(self.person, 1)
+        self.shared_summary = QLabel()
+        self.shared_summary.hide()
+        controls.addWidget(self.shared_summary, 1)
         self.divide = QPushButton('Dividir')
+        self.divide.setAccessibleName('Activar o desactivar el reparto compartido')
         self.divide.setCheckable(True)
         controls.addWidget(self.divide)
         layout.addLayout(controls)
         self.split_fields = QWidget()
         form = QFormLayout(self.split_fields)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.amounts = {}
         for person in people:
             edit = QLineEdit('0.00')
+            edit.setAccessibleName('Importe asignado a ' + ('Yo, propietario' if person['is_owner'] else str(person['name'])) + ', en MXN')
             self.amounts[str(person['id'])] = edit
-            form.addRow('Yo' if person['is_owner'] else str(person['name']), edit)
-            edit.textChanged.connect(lambda _text: self.changed.emit())
+            form.addRow(('Yo · propietario' if person['is_owner'] else str(person['name'])) + ' (MXN)', edit)
+            edit.textChanged.connect(self._split_changed)
+        self.add_person = QComboBox()
+        self.add_person.setPlaceholderText('Agregar persona')
+        self.add_person.setAccessibleName('Agregar participante al reparto')
+        for person in people:
+            self.add_person.addItem('Yo' if person['is_owner'] else str(person['name']), str(person['id']))
+        self.add_person.setCurrentIndex(-1)
+        form.addRow(self.add_person)
+        self.add_person.currentIndexChanged.connect(self._add_split_person)
         self.split_fields.hide()
         layout.addWidget(self.split_fields)
         self.person.currentIndexChanged.connect(self._select_person)
@@ -62,7 +80,33 @@ class ProductAssignment(QWidget):
             for person, edit in self.amounts.items():
                 edit.setText(pesos(original if person == self.person.currentData() else 0))
         self.split_fields.setVisible(divided)
+        self.person.setVisible(not divided)
+        self.shared_summary.setVisible(divided)
+        self._split_changed()
         self.divide.setText('Asignar a una persona' if divided else 'Dividir')
+        self.changed.emit()
+
+    def _add_split_person(self, index):
+        person = self.add_person.itemData(index)
+        if person in self.amounts:
+            field = self.amounts[person]
+            self.split_fields.layout().setRowVisible(field, True)
+            field.setFocus()
+        with QSignalBlocker(self.add_person):
+            self.add_person.setCurrentIndex(-1)
+
+    def _split_changed(self, *_):
+        positive = 0
+        for field in self.amounts.values():
+            try:
+                if money(field.text()) > 0:
+                    positive += 1
+                    self.split_fields.layout().setRowVisible(field, True)
+                elif not field.hasFocus():
+                    self.split_fields.layout().setRowVisible(field, False)
+            except ValueError:
+                self.split_fields.layout().setRowVisible(field, True)
+        self.shared_summary.setText(f'Compartido · {positive} personas')
         self.changed.emit()
 
     def shares(self):
@@ -81,15 +125,20 @@ class ProductAssignment(QWidget):
             for person in people:
                 person_id = str(person['id'])
                 label = 'Yo' if person['is_owner'] else str(person['name'])
+                split_label = ('Yo · propietario' if person['is_owner'] else str(person['name'])) + ' (MXN)'
                 index = self.person.findData(person_id)
                 if index < 0:
                     self.person.addItem(label, person_id)
                     edit = QLineEdit('0.00')
+                    edit.setAccessibleName('Importe asignado a ' + label + ', en MXN')
                     self.amounts[person_id] = edit
-                    self.split_fields.layout().addRow(label, edit)
-                    edit.textChanged.connect(lambda _text: self.changed.emit())
+                    self.split_fields.layout().addRow(split_label, edit)
+                    edit.textChanged.connect(self._split_changed)
+                    self.add_person.addItem(label, person_id)
                 else:
                     self.person.setItemText(index, label)
+                    self.split_fields.layout().labelForField(self.amounts[person_id]).setText(split_label)
+                    self.amounts[person_id].setAccessibleName('Importe asignado a ' + label + ', en MXN')
             self.person.setCurrentIndex(self.person.findData(selected))
 
 
@@ -108,17 +157,21 @@ class ProductRefundEditor(QWidget):
         self.product_name.setWordWrap(True)
         self.product_name.setMaximumHeight(42)
         self.amount = QLineEdit()
+        self.amount.setAccessibleName('Importe de la devolución en MXN')
         self.amount.setMaximumWidth(100)
         self.status = QComboBox()
+        self.status.setAccessibleName('Estado real del reembolso: pendiente o acreditado')
         self.status.addItem('Pendiente', 'PENDING')
         self.status.addItem('Acreditado', 'ACCREDITED')
         self.destination = QComboBox()
+        self.destination.setAccessibleName('Destino real del reembolso')
         self.destination.addItem('Confirma el destino real', None)
         for instrument in instruments:
             kind = {'WALLET_BALANCE': 'Billetera', 'CREDIT_CARD': 'Tarjeta',
                     'CREDIT_LINE': 'Crédito', 'OTHER': 'Otro'}[instrument['instrument_type']]
             self.destination.addItem(brand_icon(instrument.get('institution_name', ''), 'institution'), f"{instrument['alias']} ({kind})", instrument['id'])
         self.accredited_at = QLineEdit()
+        self.accredited_at.setAccessibleName('Fecha real de acreditación del reembolso, AAAA-MM-DD')
         self.accredited_at.setPlaceholderText('AAAA-MM-DD')
         self.accredited_at.setMaximumWidth(125)
         self.accredited_at.setEnabled(False)
@@ -129,11 +182,14 @@ class ProductRefundEditor(QWidget):
         purchase_layout = QHBoxLayout(self.repurchase_fields)
         purchase_layout.setContentsMargins(0, 0, 0, 0)
         self.repurchase_amount = QLineEdit()
+        self.repurchase_amount.setAccessibleName('Importe de la recompra en MXN')
         self.repurchase_amount.setMaximumWidth(100)
         self.repurchase_date = QLineEdit()
+        self.repurchase_date.setAccessibleName('Fecha de la recompra, AAAA-MM-DD')
         self.repurchase_date.setPlaceholderText('AAAA-MM-DD')
         self.repurchase_date.setMaximumWidth(125)
         self.repurchase_instrument = QComboBox()
+        self.repurchase_instrument.setAccessibleName('Cuenta o medio de pago de la recompra')
         self.repurchase_instrument.addItem('Confirma el medio de pago', None)
         for instrument in instruments:
             self.repurchase_instrument.addItem(brand_icon(instrument.get('institution_name', ''), 'institution'), instrument['alias'], instrument['id'])
@@ -279,7 +335,7 @@ class RefundRepurchaseDialog(QDialog):
         actions = QHBoxLayout(self.footer)
         actions.setContentsMargins(0, 0, 0, 0)
         actions.addStretch()
-        cancel = QPushButton('Cancelar')
+        cancel = QPushButton('Descartar cambios' if self.editing_allocations else 'Cancelar recompra')
         cancel.clicked.connect(self.reject)
         save = QPushButton('Guardar recompra')
         self.cancel_button, self.save_button = cancel, save
@@ -418,6 +474,7 @@ class ImportPreview(QDialog):
                                if self.is_service else [('time', 'Hora')] if draft.get('time') else []):
             value = draft[key]
             edit = QLineEdit('' if value is None else pesos(value) if isinstance(value, int) else value)
+            edit.setAccessibleName(label + ', leído del comprobante')
             self.fields[key] = edit
             if key not in ('date', 'paid'):
                 index = len([k for k in self.fields if k not in ('date', 'paid')]) - 1
@@ -425,7 +482,9 @@ class ImportPreview(QDialog):
                 secondary.addWidget(QLabel(label), row * 2, column)
                 secondary.addWidget(edit, row * 2 + 1, column)
         self.merchant = QLineEdit('Recarga ' + draft['company'] if self.is_service else draft.get('merchant', 'Mercado Pago'))
+        self.merchant.setAccessibleName('Comercio del comprobante, obligatorio')
         self.instrument = QComboBox()
+        self.instrument.setAccessibleName('Cuenta o tarjeta del comprobante, obligatoria')
         self.instrument.addItem('Selecciona la tarjeta o medio de pago', None)
         for instrument in repository.list_all_instruments():
             if instrument['active']:
@@ -467,6 +526,25 @@ class ImportPreview(QDialog):
         if draft.get('review_fields'):
             self.details_toggle.setChecked(True)
         layout.addWidget(self.header, 0)
+        self.msi_enabled = QCheckBox('Compra a MSI')
+        self.msi_enabled.setVisible(not self.is_service)
+        self.msi_options = QWidget()
+        msi_layout = QHBoxLayout(self.msi_options)
+        msi_layout.setContentsMargins(0, 0, 0, 0)
+        self.msi_count = QSpinBox(); self.msi_count.setRange(2,60); self.msi_count.setValue(3)
+        self.msi_count.setAccessibleName('Número de mensualidades del comprobante')
+        self.msi_first_due = QLineEdit(); self.msi_first_due.setPlaceholderText('AAAA-MM-DD')
+        self.msi_first_due.setAccessibleName('Primer vencimiento MSI confirmado manualmente')
+        msi_layout.addWidget(QLabel('Mensualidades')); msi_layout.addWidget(self.msi_count)
+        msi_layout.addWidget(QLabel('Primer vencimiento')); msi_layout.addWidget(self.msi_first_due)
+        self.msi_options.hide()
+        self.msi_enabled.toggled.connect(self.msi_options.setVisible)
+        layout.addWidget(self.msi_enabled); layout.addWidget(self.msi_options)
+        self.msi_preview = QLabel(); self.msi_preview.setWordWrap(True)
+        self.msi_preview.hide();layout.addWidget(self.msi_preview)
+        self.msi_enabled.toggled.connect(self.update_msi_preview)
+        self.msi_count.valueChanged.connect(self.update_msi_preview)
+        self.fields['charged'].textChanged.connect(self.update_msi_preview)
         self.people = [p for p in repository.list_people() if p['active']]
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(['Producto', 'Cantidad', 'Precio unitario', 'Persona / Dividir'])
@@ -488,12 +566,13 @@ class ImportPreview(QDialog):
         self.table.setColumnWidth(1, 76)
         self.table.setColumnWidth(2, 125)
         self.table.setColumnWidth(3, 300)
-        toolbar = QHBoxLayout()
+        toolbar = FlowLayout()
         self.all_for_me = QPushButton('Todo para Yo')
         self.all_for_me.clicked.connect(lambda: self.assign_all(next((str(p['id']) for p in self.people if p['is_owner']), None)))
         self.all_for_me.setEnabled(any(p['is_owner'] for p in self.people))
         toolbar.addWidget(self.all_for_me)
         self.bulk_person = QComboBox()
+        self.bulk_person.setAccessibleName('Persona para asignar todos los conceptos del comprobante')
         for person in self.people:
             self.bulk_person.addItem('Yo' if person['is_owner'] else str(person['name']), str(person['id']))
         toolbar.addWidget(self.bulk_person)
@@ -503,7 +582,6 @@ class ImportPreview(QDialog):
         self.all_for_person.setEnabled(bool(self.people))
         self.all_for_person.clicked.connect(lambda: self.assign_all(self.bulk_person.currentData()))
         toolbar.addWidget(self.all_for_person)
-        toolbar.addStretch(1)
         layout.addLayout(toolbar, 0)
         layout.addWidget(self.table, 0)
         self.refund_editor = ProductRefundEditor(self.people, [i for i in repository.list_all_instruments() if i['active']],
@@ -524,12 +602,11 @@ class ImportPreview(QDialog):
         self.update_totals()
         add = QPushButton('Agregar producto')
         add.clicked.connect(lambda: self.add_row(dict(description='', quantity=1, unit=0)))
-        product_actions = QHBoxLayout()
+        product_actions = FlowLayout()
         product_actions.addWidget(add)
         remove = QPushButton('Eliminar producto seleccionado')
         remove.clicked.connect(self.remove_row)
         product_actions.addWidget(remove)
-        product_actions.addStretch()
         layout.insertLayout(layout.indexOf(self.table), product_actions)
         if self.is_service:
             add.hide()
@@ -548,7 +625,7 @@ class ImportPreview(QDialog):
             footer_layout.addLayout(refund_actions)
         self.refund_toggle.setVisible(not self.is_service)
         actions.addStretch(1)
-        self.cancel_button = QPushButton('Cancelar')
+        self.cancel_button = QPushButton('Cancelar importación')
         self.cancel_button.clicked.connect(self.reject)
         actions.addWidget(self.cancel_button)
         self.save_button = QPushButton('Confirmar y guardar pedido')
@@ -832,6 +909,17 @@ class ImportPreview(QDialog):
         self.table.resizeRowsToContents()
         self._fit_review_table()
 
+    def update_msi_preview(self, *_):
+        self.msi_preview.setVisible(self.msi_enabled.isChecked())
+        try:
+            charge = money(self.fields['charged'].text())
+            each,residue = divmod(charge,self.msi_count.value())
+            amounts = [each+(i<residue) for i in range(self.msi_count.value())]
+            self.msi_preview.setText('Un solo pedido y un plan. Cuotas: '+', '.join(pesos(v) for v in amounts)
+                + ' MXN. Confirma las fechas; los pagos bancarios siguen siendo globales.')
+        except ValueError:
+            self.msi_preview.setText('Revisa el cargo bancario para calcular las cuotas.')
+
     def save(self):
         try:
             if self.is_service and self.refund_source is not None:
@@ -878,11 +966,22 @@ class ImportPreview(QDialog):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 return
+            dates = None
+            if self.msi_enabled.isChecked():
+                if self.is_service:
+                    raise ValueError('Una recarga no admite MSI.')
+                first = date.fromisoformat(self.msi_first_due.text().strip())
+                dates = []
+                for offset in range(self.msi_count.value()):
+                    index = first.year*12+first.month-1+offset
+                    year, month = index//12, index%12+1
+                    dates.append(date(year,month,min(first.day,monthrange(year,month)[1])).isoformat())
             self.repository.create_order(order_id=str(uuid4()), ordered_at=draft['date'],
                 merchant=self.merchant.text(), instrument_id=str(self.instrument.currentData()),
                 original_cents=original, discount_cents=draft['discount'], charged_cents=draft['charged'],
                 allocations=tuple(dict(user_id=person, amount_cents=amount) for person, amount in totals.items()),
                 import_evidence=draft, allow_duplicate=bool(duplicates),
+                purchase_mode='MSI' if dates else 'CASH', financing_specs=tuple(dates) if dates else None,
                 product_refunds=(self._refund_proposal(),) if self.refund_source is not None else ())
         except (ValueError, RuntimeError, *DATABASE_ERRORS) as error:
             message = ('No se pudo guardar la importación. No se guardaron operaciones parciales; '

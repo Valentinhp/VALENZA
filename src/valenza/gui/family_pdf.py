@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from valenza.gui import pdf_theme as theme
+from valenza.gui.personal_result import personal_result, result_label, EXPLANATION
 
 
 def final_concepts(row, repository=None):
@@ -162,6 +163,32 @@ def write_report(statement, path, *, issued_at=None, repository=None):
                 y+=18; table_header()
                 for item in items: table_row(dated(item['due_date'])+' - '+item['description'],item['amount_cents'])
                 y+=25
+        if statement.get('is_owner') and repository is not None:
+            projection = personal_result(repository)
+            new_page()
+            heading('Tu resultado personal previsto')
+            table_header()
+            table_row('Descuentos personales (información)', projection['discount_cents'])
+            result = projection['result_cents']
+            table_row('Resultado personal previsto '+result_label(result), abs(result))
+            y += 20
+            for line in wrap(EXPLANATION, right-left, 10):
+                room(14); text(left,y,line,10,color=muted); y+=14
+            y += 25
+            heading('Desglose por operación')
+            for row in projection['rows']:
+                label = row['merchant']+' - '+row['date']+' - '+row['order_id']
+                for line in wrap(label,right-left,11,'hebo'):
+                    room(18); text(left,y,line,11,'hebo'); y+=18
+                table_header()
+                table_row('Costo efectivo',row['cost_cents'])
+                table_row('Asignado a familiares',row['family_cents'])
+                table_row('Resultado previsto '+result_label(row['result_cents']),abs(row['result_cents']))
+                y+=20
+            heading('Totales del desglose'); table_header()
+            table_row('Costo efectivo total',sum(r['cost_cents'] for r in projection['rows']))
+            table_row('Total asignado a familiares',sum(r['family_cents'] for r in projection['rows']))
+            table_row('Resultado personal previsto '+result_label(result),abs(result))
         for number,p in enumerate(document,1):
             theme.page_footer(p,number,len(document))
         document.set_metadata({'title':'Estado de cuenta - '+statement['person'],'creator':'Valenza - PDF familiar 2'})

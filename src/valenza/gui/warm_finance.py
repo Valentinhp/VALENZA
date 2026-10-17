@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QWidget, QStyledItemDelegate, QFrame, QVBoxLayout,
 from html import escape
 import re
 from decimal import Decimal
+from datetime import datetime
 
 
 def format_money(cents):
@@ -14,6 +15,23 @@ def format_money(cents):
 def period_label(key):
     months = ('Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic')
     return f'{months[int(key[5:7]) - 1]} {key[:4]}' if len(key) == 7 and key[4] == '-' else key
+
+
+def date_label(value):
+    """Display a recorded date without inferring or changing its timezone."""
+    text = str(value or '')
+    try:
+        recorded = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    label = f'{recorded.day} {period_label(recorded.strftime("%Y-%m")).lower()}'
+    return label + (f' · {recorded:%H:%M}' if len(text) > 10 else '')
+
+
+class RecordedDateDelegate(QStyledItemDelegate):
+    """Keep original values for selection and sorting; format only their display."""
+    def displayText(self, value, locale):
+        return date_label(value)
 
 
 def financial_text_html(text):
@@ -176,15 +194,17 @@ class FinanceChart(QWidget):
         self.kind = kind
         self.values = []
         self.current = ''
+        self.period = ''
         self.setFixedHeight(180)
         self.setMinimumWidth(240)
 
     def sizeHint(self):
         return QSize(420, 165)
 
-    def set_data(self, values, current=''):
+    def set_data(self, values, current='', *, period=''):
         self.values = values
         self.current = current
+        self.period = period
         self.setToolTip('\n'.join(f'{label}: {format_money(value)}' for label, value in values))
         self._fit_height()
         self.update()
@@ -192,7 +212,8 @@ class FinanceChart(QWidget):
     def _fit_height(self):
         empty = not any(value > 0 for _, value in self.values)
         horizontal = self.kind == 'bars' and self.width() / max(1, len(self.values)) < 125
-        self.setFixedHeight(110 if empty else max(180, 52 + len(self.values) * 32) if horizontal else 180)
+        self.setFixedHeight(110 if empty else max(180, 52 + len(self.values) * 46 + (125 if self.width() < 360 else 0)) if self.kind == 'donut'
+                            else max(180, 52 + len(self.values) * 32) if horizontal else 180)
 
     def resizeEvent(self, event):
         self._fit_height()
@@ -206,13 +227,15 @@ class FinanceChart(QWidget):
         p.drawRoundedRect(QRectF(1, 1, self.width()-2, self.height()-2), 12, 12)
         p.setPen(QColor('#26343c'))
         font = p.font(); font.setPointSize(11); font.setBold(True); p.setFont(font)
-        p.drawText(QRectF(14, 8, self.width()-28, 24), 'Compromisos por mes' if self.kind == 'bars' else 'Distribución del pendiente')
+        p.drawText(QRectF(14, 8, self.width()-28, 24), 'Compromisos por mes' if self.kind == 'bars'
+                   else 'Por persona · ' + period_label(self.period) if self.period else 'Pendiente por persona')
         font.setPointSize(9); font.setBold(False); p.setFont(font)
         total = sum(max(0, value) for _, value in self.values)
         if not total:
             p.setPen(QColor('#7a807e'))
             p.drawText(QRectF(14, 38, self.width()-28, self.height()-45), Qt.AlignmentFlag.AlignCenter,
-                       'Sin compromisos previstos' if self.kind == 'bars' else 'Sin obligaciones pendientes')
+                       'Sin compromisos previstos' if self.kind == 'bars'
+                       else 'Sin pendientes en este mes' if self.period else 'Sin obligaciones pendientes')
             p.end()
             return
         if self.kind == 'bars':
@@ -246,22 +269,37 @@ class FinanceChart(QWidget):
                 p.drawText(QRectF(x, bottom-height-22, step, 20), Qt.AlignmentFlag.AlignCenter, format_money(value))
         else:
             diameter = min(106, self.height()-50)
-            rect = QRectF(26, 44, diameter, diameter)
+            stacked = self.width() < 360
+            rect = QRectF((self.width()-diameter)/2 if stacked else 26, 44, diameter, diameter)
             angle = 90 * 16
-            colors = ('#cc785c', '#8ca99a')
+            colors = ('#8ca99a', '#a4bccf', '#b5a5bc', '#c8b58c', '#99b8b0', '#b2b9c5')
+            family_index = 0
             for index, (label, value) in enumerate(self.values):
+                highlighted = label == self.current
+                color = '#b85d38' if highlighted else colors[family_index % len(colors)]
+                if not highlighted:
+                    family_index += 1
                 span = round(max(0, value) / total * 360 * 16)
-                p.setPen(QPen(QColor(colors[index % 2]), 17))
-                p.drawArc(rect.adjusted(9, 9, -9, -9), angle, -span)
+                p.setPen(QPen(QColor(color), 22 if highlighted else 14))
+                p.drawArc(rect.adjusted(12, 12, -12, -12), angle, -span)
                 angle -= span
-                x = diameter + 54
-                y = 57 + index * 42
-                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(colors[index % 2]))
+                x = 22 if stacked else diameter + 54
+                y = (178 if stacked else 53) + index * 46
+                if highlighted:
+                    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor('#f8e9dc'))
+                    p.drawRoundedRect(QRectF(x-8, y-9, self.width()-x-6, 43), 6, 6)
+                font.setPointSize(9); font.setBold(highlighted); p.setFont(font)
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(color))
                 p.drawEllipse(QRectF(x, y, 7, 7))
-                p.setPen(QColor('#6f7472'))
-                p.drawText(QRectF(x+14, y-5, self.width()-x-20, 20), label)
-                p.setPen(QColor('#26343c'))
-                p.drawText(QRectF(x+14, y+12, self.width()-x-20, 22), format_money(value))
+                width = max(20, self.width()-x-26)
+                p.setPen(QColor('#8c4227' if highlighted else '#6f7472'))
+                p.drawText(QRectF(x+14, y-5, width, 20),
+                           p.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, int(width)))
+                amount = format_money(value)
+                while font.pointSize() > 7 and p.fontMetrics().horizontalAdvance(amount) > width:
+                    font.setPointSize(font.pointSize()-1); p.setFont(font)
+                p.setPen(QColor('#8c4227' if highlighted else '#26343c'))
+                p.drawText(QRectF(x+14, y+12, width, 22), amount)
         p.end()
 
 

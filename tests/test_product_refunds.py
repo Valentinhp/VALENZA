@@ -9,8 +9,9 @@ from valenza.persistence.repository import FinanceRepository
 
 
 @pytest.fixture
-def repository():
-    database = LocalDatabase.open(':memory:', 'synthetic', allow_synthetic_in_memory=True)
+def repository(tmp_path):
+    database = LocalDatabase.open(tmp_path / 'synthetic-refunds.db', 'synthetic')
+    assert database.encrypted
     database.migrate()
     repo = FinanceRepository(database)
     repo.add_person('owner', 'Yo', is_owner=True)
@@ -185,7 +186,7 @@ def test_repurchase_requires_received_funds_and_preserves_pending_refund(reposit
     assert len(repository.list_orders()) == 1
 
 
-def test_migration_preserves_previous_refund_and_repurchase_history(repository):
+def test_migration_preserves_previous_refund_and_repurchase_history(repository, tmp_path):
     # The official migration adds only the link/revision tables, preserving v13 refunds.
     database = repository.database
     args = purchase_args(destination='wallet')
@@ -193,6 +194,7 @@ def test_migration_preserves_previous_refund_and_repurchase_history(repository):
     refund_id = repository.list_product_refunds('order')[0]['id']
     database.migrate(13)
     row = dict(database.connection.execute('SELECT * FROM imported_product_refund WHERE id=?', (refund_id,)).fetchone())
+    database.prepare_migration_backup(tmp_path/'synthetic-before-refund-upgrade.db', 'synthetic')
     database.migrate()
     assert dict(database.connection.execute('SELECT * FROM imported_product_refund WHERE id=?', (refund_id,)).fetchone()) == row
     assert repository.dashboard_summary()['receivables_cents'] == 2122
@@ -572,6 +574,7 @@ def test_discount_details_and_dashboard_render_compactly(repository, tmp_path):
     window.resize(1100, 680)
     window.show()
     application.processEvents()
+    window.dashboard_privacy.click()
     assert '$60.29 MXN' in window.dashboard_discount.findChild(QLabel, 'summaryAmount').text()
     assert '$542.58 MXN' in window.dashboard_debt.findChild(QLabel, 'summaryAmount').text()
     assert '$505.07 MXN' in window.dashboard_receivables.findChild(QLabel, 'summaryAmount').text()

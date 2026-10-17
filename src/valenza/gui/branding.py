@@ -18,6 +18,7 @@ def normalize_name(name):
     return re.sub(r'[^a-z0-9]+', ' ', ''.join(c for c in text if not unicodedata.combining(c))).strip()
 
 SERVICE_ALIASES = {
+    'meliplus': ('meli', 'meli mas', 'meli plus', 'melimas', 'meliplus', 'meli total', 'meli esencial', 'meli mega'),
     'spotify': ('spotify', 'spotify premium', 'spotify familiar', 'spotify duo', 'spotify premium familiar', 'spotify individual'),
     'youtube': ('youtube', 'youtube premium', 'youtube music', 'youtube music premium', 'yt premium', 'youtube premium familiar'),
     'netflix': ('netflix', 'netflix premium', 'netflix estandar', 'netflix basico'),

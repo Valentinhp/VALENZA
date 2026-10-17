@@ -130,7 +130,7 @@ def test_msi_ui_link_and_dynamic_small_dialog(repository,monkeypatch,tmp_path):
         dialog=window.findChildren(QDialog)[-1]; dialog.resize(480,280)
         field=next(f for f in dialog.findChildren(QLineEdit) if 'banco' in f.placeholderText())
         field.setText('2026-11-30')
-        save=next(b for b in dialog.findChildren(QPushButton) if b.text()=='Guardar')
+        save=next(b for b in dialog.findChildren(QPushButton) if b.text()=='Vincular plan MSI')
         assert save.isVisible() and save.mapTo(dialog,save.rect().bottomRight()).y()<dialog.height()
         dialog.grab().save(str(tmp_path/'msi-link-small.png')); save.click()
         if dialog.isVisible(): dialog.reject()

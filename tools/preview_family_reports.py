@@ -1,5 +1,6 @@
 """Generate synthetic samples through the real Inicio PDF button, never a personal DB."""
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import pymupdf
 from PySide6.QtWidgets import QFileDialog
 from valenza.gui.app import MainWindow, create_application, write_family_pdf
@@ -9,7 +10,10 @@ from valenza.persistence.repository import FinanceRepository
 
 
 def sample_repository():
-    db=LocalDatabase.open(':memory:','synthetic-only',allow_synthetic_in_memory=True)
+    temporary = TemporaryDirectory(prefix='valenza-synthetic-pdf-')
+    db=LocalDatabase.open(Path(temporary.name)/'synthetic.db','synthetic-only')
+    db._synthetic_temporary_directory = temporary
+    assert db.encrypted
     db.migrate()
     repo=FinanceRepository(db)
     repo.add_person('owner','Yo',is_owner=True)

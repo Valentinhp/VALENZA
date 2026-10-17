@@ -30,8 +30,11 @@ def test_family_pdf_private_data_removed_same_person_balance(repository,tmp_path
     assert 'Total a tu cargo' in text and 'Ya pagaste' in text and 'Te falta pagar' in text
     for key in ('assigned_cents','paid_cents','remaining_cents'):
         assert format_money(statement[key]) in text
-    assert all(word.casefold() not in text.casefold() for word in PRIVATE_WORDS)
-    assert '$60.29 MXN' not in text and '$542.58 MXN' not in text and '$186.57 MXN' not in text
+    if person != 'owner':
+        assert all(word.casefold() not in text.casefold() for word in PRIVATE_WORDS)
+        assert '$60.29 MXN' not in text and '$542.58 MXN' not in text and '$186.57 MXN' not in text
+    else:
+        assert 'Descuentos personales' in text and 'Resultado personal previsto' in text
     dashboard=next(p for p in repository.people_debt_summary() if p['id']==person)
     assert statement['remaining_cents']==dashboard['remaining_cents']
     assert statement['paid_cents']==dashboard['paid_cents']

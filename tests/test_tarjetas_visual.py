@@ -38,9 +38,11 @@ def test_cards_layout_readonly(tmp_path, count):
     if count:
         window.cards_table.selectRow(0)
         assert window.card_summary_cards[0].findChild(QLabel,'summaryAmount').text() == '$250.00 MXN'
-        assert 'Banco: $255.00 MXN' in window.bank_query_comparison.text()
+        # An old bank reference stays in history, separate from today's debt.
+        assert window.bank_history.item(0, 2).text() == '$255.00 MXN'
         assert window.card_apply_payment.count() == 1
         assert window.card_apply_installment.count() == 3
+        window.card_detail_toggle.click(); app.processEvents()
         assert window.card_detail_scroll.verticalScrollBar().maximum() > 0
     out = Path(os.environ.get('VALENZA_VISUAL_OUTPUT', 'output/tarjetas')); out.mkdir(parents=True,exist_ok=True)
     if count == 1:
@@ -84,6 +86,8 @@ def test_card_buttons_preserve_operation_types(tmp_path, monkeypatch):
         return next(b for b in window.pages.widget(4).findChildren(QPushButton) if b.text() == text)
     summary = repo.dashboard_summary()
     window.bank_query_amount.setText('305.00')
+    window.bank_closing_date.setText('2026-10-10')
+    window.bank_due_date.setText('2026-10-20')
     window.bank_query_save.click()
     after_query = repo.dashboard_summary()
     assert {k:v for k,v in after_query.items() if k != 'bank_comparisons'} == {
@@ -116,7 +120,7 @@ def test_card_buttons_preserve_operation_types(tmp_path, monkeypatch):
     assert repo.list_card_summaries()[0]['closing_day'] == 10
     window.admin_card_name.setText('Updated synthetic card')
     window.admin_card_last_four.setText('4321')
-    button('Guardar cambios').click()
+    button('Guardar cuenta').click()
     assert repo.instrument_profile('card')['last_four'] == '4321'
     assert repo.list_all_instruments()[0]['id'] == 'card'
     button('Activar/desactivar').click() # institution toggle
